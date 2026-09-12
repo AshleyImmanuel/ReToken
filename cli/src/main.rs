@@ -24,6 +24,10 @@ enum Commands {
     },
     /// Wrap an agent or CLI tool, automatically routing its LLM traffic through ReToken
     Wrap {
+        /// Optional extra environment variables to override with the proxy URL (e.g. OLLAMA_API_BASE)
+        #[arg(short, long)]
+        inject: Vec<String>,
+
         /// The command to wrap (e.g. `claude`, `aider`, `python script.py`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -60,7 +64,7 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("  Exports: {:?}", node.exports);
             }
         }
-        Commands::Wrap { command } => {
+        Commands::Wrap { inject, command } => {
             if command.is_empty() {
                 eprintln!("Error: wrap requires a command to execute (e.g., `retoken wrap claude`)");
                 std::process::exit(1);
@@ -89,16 +93,26 @@ async fn main() -> anyhow::Result<()> {
             }
 
             tracing::info!("Wrapping command: {:?}", command);
-            let mut child = tokio::process::Command::new(&command[0])
-                .args(&command[1..])
+            let mut cmd = tokio::process::Command::new(&command[0]);
+            
+            cmd.args(&command[1..])
                 .env("ANTHROPIC_BASE_URL", proxy_url)
                 .env("OPENAI_BASE_URL", proxy_url)
                 .env("OPENAI_API_BASE", proxy_url)
                 .env("GEMINI_BASE_URL", proxy_url)
                 .env("GOOGLE_GEMINI_BASE_URL", proxy_url)
-                .env("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "1") // Fix for Claude Code 1M token context
-                .spawn()
-                .expect("Failed to spawn wrapped command");
+                .env("LITELLM_BASE_URL", proxy_url)
+                .env("GROQ_BASE_URL", proxy_url)
+                .env("MISTRAL_API_BASE", proxy_url)
+                .env("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "1"); // Fix for Claude Code 1M token context
+
+            // Inject custom user-provided variables
+            for var in inject {
+                tracing::info!("Injecting custom env var: {}={}", var, proxy_url);
+                cmd.env(&var, proxy_url);
+            }
+
+            let mut child = cmd.spawn().expect("Failed to spawn wrapped command");
 
             let status = child.wait().await.expect("Failed to wait on child process");
             std::process::exit(status.code().unwrap_or(1));
