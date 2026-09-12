@@ -33,13 +33,13 @@ cargo build --release -p cli
 
 ### Usage
 
-Start the background daemon:
+To start intercepting traffic, launch the ReToken engine in the background:
 
 ```bash
-target/release/cli.exe run
+retoken run
 ```
 
-By default, the proxy will listen on `http://127.0.0.1:8888`.
+*(Note: The daemon silently binds to the local loopback interface `127.0.0.1:8888` to intercept LLM traffic without exposing any external ports.)*
 
 ### IDE Configuration
 
