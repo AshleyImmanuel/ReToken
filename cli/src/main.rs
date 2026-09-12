@@ -1,11 +1,12 @@
-use core::telemetry;
+use retoken_core::telemetry;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     telemetry::init_tracing();
     tracing::info!("ReToken Agent Flight Recorder starting...");
 
     // Start gateway
-    gateway::start();
+    gateway::start().await?;
     
     Ok(())
 }
