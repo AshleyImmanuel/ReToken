@@ -22,6 +22,12 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         path: String,
     },
+    /// Wrap an agent or CLI tool, automatically routing its LLM traffic through ReToken
+    Wrap {
+        /// The command to wrap (e.g. `claude`, `aider`, `python script.py`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -53,6 +59,49 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("  Imports: {:?}", node.imports);
                 tracing::info!("  Exports: {:?}", node.exports);
             }
+        }
+        Commands::Wrap { command } => {
+            if command.is_empty() {
+                eprintln!("Error: wrap requires a command to execute (e.g., `retoken wrap claude`)");
+                std::process::exit(1);
+            }
+
+            let proxy_addr = "127.0.0.1:8888"; // Wait, gateway is running on 8888 in code!
+            let proxy_url = "http://127.0.0.1:8888/v1";
+
+            if std::net::TcpStream::connect(proxy_addr).is_err() {
+                tracing::info!("Gateway not running on {}. Spawning background proxy...", proxy_addr);
+                let current_exe = std::env::current_exe().unwrap();
+                let _daemon = std::process::Command::new(current_exe)
+                    .arg("run")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .expect("Failed to spawn background proxy");
+                
+                // Wait for proxy to bind
+                for _ in 0..20 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if std::net::TcpStream::connect(proxy_addr).is_ok() {
+                        break;
+                    }
+                }
+            }
+
+            tracing::info!("Wrapping command: {:?}", command);
+            let mut child = tokio::process::Command::new(&command[0])
+                .args(&command[1..])
+                .env("ANTHROPIC_BASE_URL", proxy_url)
+                .env("OPENAI_BASE_URL", proxy_url)
+                .env("OPENAI_API_BASE", proxy_url)
+                .env("GEMINI_BASE_URL", proxy_url)
+                .env("GOOGLE_GEMINI_BASE_URL", proxy_url)
+                .env("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "1") // Fix for Claude Code 1M token context
+                .spawn()
+                .expect("Failed to spawn wrapped command");
+
+            let status = child.wait().await.expect("Failed to wait on child process");
+            std::process::exit(status.code().unwrap_or(1));
         }
     }
     
