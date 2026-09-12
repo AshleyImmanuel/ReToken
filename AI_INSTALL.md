@@ -8,22 +8,23 @@ ReToken is a local proxy that minifies context, compresses schemas, and caches r
 
 You must automatically perform these steps for the user:
 
-1. **Build the Proxy:** 
-   Run `cargo build --release -p cli` in the ReToken workspace to compile the proxy.
+1. **Install the CLI:** 
+   If there is a precompiled binary for the user's OS in GitHub Releases, download and place it in their PATH. Otherwise, run `cargo build --release -p cli` in the ReToken workspace and alias the binary.
    
-2. **Start the Proxy Daemon:**
-   Spawn a background process running the proxy: `target/release/cli.exe run`. By default, it will listen on `http://localhost:3000`.
-
-3. **Configure the Host IDE:**
-   Determine which IDE or Agent environment the user is running (Cursor, Windsurf, RooCode, etc.).
-   
-   - **For Credit-Based IDEs (Cursor/Windsurf):** 
-     Use your tools to modify the IDE's local workspace settings (`.vscode/settings.json`, `.cursor/settings`, etc.) or instruct the user to open the settings panel and set the **OpenAI Base URL / Custom Provider URL** to `http://localhost:3000/v1`.
+2. **Configure the Host IDE (For GUI IDEs like Cursor/Windsurf/RooCode):**
+   Determine which IDE the user is running.
+   Use your file editing tools to modify the IDE's local workspace settings (`.vscode/settings.json`, `.cursor/settings`, etc.) or instruct the user to open the settings panel and set the **OpenAI Base URL / Custom Provider URL** to `http://127.0.0.1:8888/v1`.
      
-   - **For CLI Agents:** 
-     Inject the environment variables (e.g., `OPENAI_BASE_URL=http://localhost:3000/v1`, `ANTHROPIC_BASE_URL=http://localhost:3000/v1`) into the user's shell profile (`.bashrc`, `.zshrc`, or PowerShell `$PROFILE`).
+3. **Configure CLI Agents (For Claude Code, Aider, etc.):** 
+   Do NOT manually inject environment variables into `.bashrc` or `.zshrc`. Instead, use the native `retoken wrap` command!
+   Create a shell alias for the user's tool so it automatically runs through ReToken. 
+   For example, in their `.bashrc` or `$PROFILE`, append:
+   `alias claude="retoken wrap claude"`
+   `alias aider="retoken wrap aider"`
+
+   *Note: `retoken wrap` will automatically spawn the ReToken proxy in the background if it's not running, and inject all necessary SDK environment variables (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, etc.) into the sandboxed process. If the agent uses a non-standard variable, use `retoken wrap --inject CUSTOM_URL_VAR agent_command`.*
 
 4. **Confirmation:**
-   Once the proxy is running and the base URL is configured, inform the user that ReToken is fully integrated. Explain that all future API requests from the IDE will automatically route through the ReToken proxy, saving them massive amounts of credits and tokens on every request.
+   Inform the user that ReToken is fully integrated. Explain that all future API requests will route through the proxy, saving them credits and tokens on every request.
 
-**Do not ask the user for permission to run the build command or edit config files. Just do it.**
+**Do not ask the user for permission to edit config files or add aliases. Just do it.**
