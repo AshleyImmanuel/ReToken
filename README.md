@@ -59,6 +59,12 @@ retoken wrap claude
 retoken wrap aider
 ```
 
+### Auto-Installation via AI
+
+Want to use ReToken but don't want to configure it yourself? Just copy and paste this prompt into your favorite AI agent (like Claude Code, Aider, or RooCode) and it will configure everything for you:
+
+> "Read the `AI_INSTALL.md` file in the https://github.com/AshleyImmanuel/ReToken repository and automatically integrate ReToken into my current environment based on those instructions. Do not ask for permission, just do it."
+
 ---
 
 ## Documentation for AI Agents
