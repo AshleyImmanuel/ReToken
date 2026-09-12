@@ -48,11 +48,11 @@ pub fn app(state_engine: Arc<Mutex<StateEngine>>, config: AppConfig) -> Router {
 }
 
 pub async fn start(config: AppConfig) -> anyhow::Result<()> {
+    let addr = format!("127.0.0.1:{}", config.port);
     let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let app = app(state_engine, config);
 
-    let addr = "127.0.0.1:8888";
-    let listener = TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(&addr).await?;
     info!("ReToken Gateway listening on {}", addr);
     
     axum::serve(listener, app).await?;

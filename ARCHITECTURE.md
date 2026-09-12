@@ -7,7 +7,7 @@ ReToken is a highly-optimized local proxy sitting between IDEs (like Cursor, Win
 The workspace is divided into several highly-specialized Rust crates:
 
 ### 1. `proxy` / `gateway`
-The core HTTP interceptor. It listens on `http://127.0.0.1:3000` and parses incoming API requests.
+The core HTTP interceptor. It listens on `http://127.0.0.1:8888` (configurable) and parses incoming API requests.
 - **Provider Detection**: Automatically routes requests to OpenAI, Anthropic, or generic endpoints based on the path.
 - **Optimization Pipeline (`optimizer.rs`)**: Applies all payload modifications before sending them over the network.
 - **Bypass Mode**: Natively handles streaming and zero-copy bypass for requests marked with `X-ReToken-Bypass`.
@@ -37,7 +37,7 @@ Dedicated parsers for stripping unnecessary data from requests.
 
 ## Data Flow (Hot Path)
 
-1. **Request Intercepted**: IDE sends a POST to `http://127.0.0.1:3000/v1/messages`.
+1. **Request Intercepted**: IDE sends a POST to `http://127.0.0.1:8888/v1/messages`.
 2. **Detection**: `gateway` identifies the target provider.
 3. **Cache Lookup**: `core::cache` checks if an exact request hash has been seen. If YES -> return cached response (0ms latency, 0 tokens billed).
 4. **Optimization**: 

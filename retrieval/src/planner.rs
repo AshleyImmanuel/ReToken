@@ -53,9 +53,13 @@ impl ContextPlanner {
             }
             
             // In a real system, we'd look up the exact StateObject token size.
-            // For MVP, we estimate based on file size or a mock value.
-            // Let's assume 1 token ~ 4 bytes, we just use a dummy estimate of 500 tokens per file for MVP
-            let token_estimate = 500;
+            // For MVP, we estimate based on file size: 1 token ~ 4 bytes.
+            let token_estimate = if let Ok(metadata) = std::fs::metadata(&path) {
+                (metadata.len() as usize) / 4
+            } else {
+                500 // fallback if file missing
+            };
+            
             let file_id = path.to_string_lossy().into_owned(); // Normally we'd use the SHA hash object_id
             
             if !package.add(file_id, token_estimate) {

@@ -11,6 +11,7 @@ pub struct AppConfig {
     /// Maximum number of entries the cache will hold before evicting oldest.
     pub max_cache_entries: usize,
     pub terse_mode: bool,
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,6 +29,7 @@ impl Default for AppConfig {
             cache_ttl_secs: 300, // 5 minutes default
             max_cache_entries: 1024,
             terse_mode: true,
+            port: 8888,
         }
     }
 }
