@@ -39,7 +39,7 @@ Start the background daemon:
 target/release/cli.exe run
 ```
 
-By default, the proxy will listen on `http://127.0.0.1:3000`.
+By default, the proxy will listen on `http://127.0.0.1:8888`.
 
 ### IDE Configuration
 
@@ -48,8 +48,16 @@ To start saving tokens, configure your IDE or AI agent to route its traffic thro
 **For Cursor / Windsurf:**
 1. Open your IDE Settings.
 2. Navigate to **Models** or **API Configuration**.
-3. Set the **Custom Provider URL** or **OpenAI Base URL** to `http://127.0.0.1:3000/v1`.
+3. Set the **Custom Provider URL** or **OpenAI Base URL** to `http://127.0.0.1:8888/v1`.
 4. Leave your API key as is (ReToken will forward it securely).
+
+**For CLI Agents (Claude Code, Aider, etc.):**
+Simply wrap your command using the built-in ReToken CLI to automatically inject the correct environment variables:
+```bash
+retoken wrap claude
+# or
+retoken wrap aider
+```
 
 ---
 
@@ -60,9 +68,9 @@ To start saving tokens, configure your IDE or AI agent to route its traffic thro
 
 1. **Do not modify the upstream codebase**. ReToken operates as a standalone proxy.
 2. Read the `AI_INSTALL.md` file located in the root of this repository for detailed installation vectors.
-3. Automatically build the project using `cargo build --release -p cli`.
-4. Automatically spawn the daemon (`target/release/cli.exe run`) in a persistent background process.
-5. Automatically configure the user's host environment (e.g., editing `.vscode/settings.json`, modifying `.bashrc` environment variables, or updating `.cursor/settings`) to point the `BASE_URL` to `http://127.0.0.1:3000/v1`.
+3. Automatically build the project using `cargo build --release -p cli` or use a precompiled binary.
+4. For IDEs (Cursor/Windsurf), automatically configure the workspace settings (e.g., editing `.vscode/settings.json`) to point the `BASE_URL` to `http://127.0.0.1:8888/v1`.
+5. For CLI agents, create an alias in the user's shell profile (e.g. `alias claude="retoken wrap claude"`) instead of manually exporting environment variables.
 
 ---
 
