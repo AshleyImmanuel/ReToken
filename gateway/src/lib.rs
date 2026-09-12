@@ -117,9 +117,13 @@ async fn handler(State(state): State<Arc<GatewayState>>, req: Request<Body>) -> 
 
     let mut json_body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
     
+    let mut is_stream = false;
     if let Some(ref jb) = json_body {
         if let Some(model) = jb.get("model").and_then(|m| m.as_str()) {
             record.model = model.to_string();
+        }
+        if let Some(stream_val) = jb.get("stream").and_then(|s| s.as_bool()) {
+            is_stream = stream_val;
         }
     }
 
@@ -208,6 +212,26 @@ async fn handler(State(state): State<Arc<GatewayState>>, req: Request<Body>) -> 
         })
         .collect();
 
+    // ── NATIVE STREAMING BYPASS ──────────────────────────────
+    // If the IDE requested a stream, we pipe it back immediately.
+    // (MVP: Token counting and caching are disabled for streams)
+    if is_stream {
+        info!("Streaming response natively (bypassing cache & token extraction)");
+        let stream = resp.bytes_stream();
+        let mut builder = Response::builder().status(status);
+        if let Some(headers) = builder.headers_mut() {
+            for (name, value) in &resp_headers {
+                if let (Ok(hn), Ok(hv)) = (
+                    axum::http::header::HeaderName::from_bytes(name.as_bytes()),
+                    axum::http::header::HeaderValue::from_str(value),
+                ) {
+                    headers.insert(hn, hv);
+                }
+            }
+        }
+        return Ok(builder.body(Body::from_stream(stream)).unwrap());
+    }
+
     let resp_bytes = resp.bytes().await
         .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
 
@@ -271,10 +295,8 @@ async fn forward_raw(
         }
     }
 
-    let bytes = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
-    let reqwest_req = req_builder.body(reqwest::Body::from(bytes)).build()
+    // Zero-copy stream request body
+    let reqwest_req = req_builder.body(reqwest::Body::wrap_stream(body.into_data_stream())).build()
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
     let resp = client.execute(reqwest_req).await.map_err(|e| {
@@ -283,8 +305,9 @@ async fn forward_raw(
     })?;
 
     let status = resp.status();
-    let resp_bytes = resp.bytes().await.map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?;
-
+    
+    // Zero-copy stream response body
+    let stream = resp.bytes_stream();
     let builder = Response::builder().status(status);
-    Ok(builder.body(Body::from(resp_bytes)).unwrap())
+    Ok(builder.body(Body::from_stream(stream)).unwrap())
 }
