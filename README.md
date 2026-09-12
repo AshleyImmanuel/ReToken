@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/logo.jpg" width="120" alt="ReToken Logo" style="border-radius: 12px; margin-bottom: 20px;" />
+  <img src="docs/banner.jpg" width="100%" alt="ReToken Banner" style="border-radius: 12px; margin-bottom: 20px;" />
   <h1>ReToken</h1>
   <p><strong>Zero-Latency Local Proxy for Agentic Workflows & Credit-Based IDEs</strong></p>
 </div>
