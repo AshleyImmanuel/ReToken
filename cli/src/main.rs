@@ -1,10 +1,8 @@
 use retoken_core::telemetry;
-use retoken_core::config::AppConfig;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
-use analyzers::scanner::Scanner;
-use analyzers::symbols::SymbolExtractor;
-use analyzers::graph::DependencyGraph;
+
+pub mod wrap;
+pub mod analyze;
 
 #[derive(Parser)]
 #[command(name = "retoken")]
@@ -40,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
     telemetry::init_tracing();
     let cli = Cli::parse();
 
-    match &cli.command.unwrap_or(Commands::Run) {
+    match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => {
             tracing::info!("ReToken Agent Flight Recorder starting...");
             // For MVP, just use Default config, we will load this from a file later
@@ -48,83 +46,10 @@ async fn main() -> anyhow::Result<()> {
             gateway::start(config).await?;
         }
         Commands::Analyze { path } => {
-            tracing::info!("Analyzing repository at {}", path);
-            let scanner = Scanner::new(PathBuf::from(path));
-            let files = scanner.scan();
-            tracing::info!("Discovered {} source files", files.len());
-            
-            let extractor = SymbolExtractor::new();
-            let graph = DependencyGraph::build(files, &extractor);
-            
-            tracing::info!("Graph built with {} nodes", graph.files.len());
-            for (file, node) in graph.files.iter().take(5) {
-                tracing::info!("File: {:?}", file);
-                tracing::info!("  Functions: {:?}", node.functions);
-                tracing::info!("  Classes: {:?}", node.classes);
-                tracing::info!("  Imports: {:?}", node.imports);
-                tracing::info!("  Exports: {:?}", node.exports);
-            }
+            analyze::run_analyze(path)?;
         }
         Commands::Wrap { inject, command } => {
-            if command.is_empty() {
-                eprintln!("Error: wrap requires a command to execute (e.g., `retoken wrap claude`)");
-                std::process::exit(1);
-            }
-
-            let config = AppConfig::default();
-            let proxy_addr = format!("127.0.0.1:{}", config.port);
-            let proxy_url = format!("http://127.0.0.1:{}/v1", config.port);
-
-            if std::net::TcpStream::connect(&proxy_addr).is_err() {
-                tracing::info!("Gateway not running on {}. Spawning background proxy...", proxy_addr);
-                let current_exe = std::env::current_exe().unwrap();
-                let mut daemon_cmd = std::process::Command::new(current_exe);
-                daemon_cmd.arg("run")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    daemon_cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-                }
-                
-                #[allow(clippy::zombie_processes)]
-                let _ = daemon_cmd.spawn().expect("Failed to spawn background proxy");
-                
-                // Wait for proxy to bind
-                for _ in 0..20 {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    if std::net::TcpStream::connect(&proxy_addr).is_ok() {
-                        break;
-                    }
-                }
-            }
-
-            tracing::info!("Wrapping command: {:?}", command);
-            let mut cmd = tokio::process::Command::new(&command[0]);
-            
-            cmd.args(&command[1..])
-                .env("ANTHROPIC_BASE_URL", &proxy_url)
-                .env("OPENAI_BASE_URL", &proxy_url)
-                .env("OPENAI_API_BASE", &proxy_url)
-                .env("GEMINI_BASE_URL", &proxy_url)
-                .env("GOOGLE_GEMINI_BASE_URL", &proxy_url)
-                .env("LITELLM_BASE_URL", &proxy_url)
-                .env("GROQ_BASE_URL", &proxy_url)
-                .env("MISTRAL_API_BASE", &proxy_url)
-                .env("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "1"); // Fix for Claude Code 1M token context
-
-            // Inject custom user-provided variables
-            for var in inject {
-                tracing::info!("Injecting custom env var: {}={}", var, proxy_url);
-                cmd.env(var, &proxy_url);
-            }
-
-            let mut child = cmd.spawn().expect("Failed to spawn wrapped command");
-
-            let status = child.wait().await.expect("Failed to wait on child process");
-            std::process::exit(status.code().unwrap_or(1));
+            wrap::run_wrap(inject, command).await?;
         }
     }
     
