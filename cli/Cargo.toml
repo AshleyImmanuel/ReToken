@@ -10,3 +10,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
+clap = { version = "4.6.6", features = ["derive"] }
+analyzers = { version = "0.1.0", path = "../analyzers" }

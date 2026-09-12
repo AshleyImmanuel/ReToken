@@ -7,7 +7,7 @@ members = [
     "gateway",
     "proxy",
     "cli"
-]
+, "compressors"]
 resolver = "2"
 
 [workspace.dependencies]

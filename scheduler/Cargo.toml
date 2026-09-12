@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-retoken_core = { path = "../core" }
+retoken_core = { version = "0.1.0", path = "../core" }
+tokio = { workspace = true, features = ["process", "rt", "sync", "time", "macros"] }
+uuid = { version = "1.26.1", features = ["v4"] }

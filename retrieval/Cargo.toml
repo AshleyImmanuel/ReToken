@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-retoken_core = { path = "../core" }
+analyzers = { version = "0.1.0", path = "../analyzers" }
+retoken_core = { version = "0.1.0", path = "../core" }
+serde_json.workspace = true

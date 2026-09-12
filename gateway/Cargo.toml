@@ -11,3 +11,10 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+retrieval = { version = "0.1.0", path = "../retrieval" }
+analyzers = { version = "0.1.0", path = "../analyzers" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+http-body-util = "0.1.5"
+tower = { version = "0.5.3", features = ["util"] }
