@@ -17,6 +17,7 @@ pub mod provider;
 pub mod optimizer;
 pub mod bypass;
 pub mod handler;
+pub mod interceptor;
 
 use handler::{handler as gateway_handler, GatewayState};
 

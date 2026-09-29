@@ -6,3 +6,7 @@ pub mod delta;
 pub mod minify;
 pub mod pipeline;
 pub mod stats;
+pub mod inject;
+pub mod process;
+pub mod base64;
+pub mod anomaly;
