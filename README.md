@@ -6,7 +6,7 @@
 ---
 
 > [!NOTE]
-> **ReToken** is a blazing-fast local proxy written in Rust that sits between your AI coding assistants (Cursor, Windsurf, RooCode) and their upstream LLM providers (Anthropic, OpenAI, etc.). It aggressively minimizes tokens, compresses schemas, and caches duplicate requests to drastically cut your API bills.
+> **ReToken** is a blazing-fast, next-generation local proxy written in Rust that sits between your AI coding assistants (Cursor, Windsurf, RooCode) and their upstream LLM providers (Anthropic, OpenAI, etc.). While previous iterations of token-saving relied purely on prompt engineering to enforce terse output, ReToken takes it to the next level by operating transparently on the wire. It aggressively minimizes tokens using Contextual Compression and Retrieval (CCR), structural heuristics, and caching to drastically cut your API bills without losing critical context.
 
 ## Core Features
 
