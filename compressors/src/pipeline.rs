@@ -158,17 +158,20 @@ fn compress_text_value(text: &mut Value, ccr_store: &CcrStore, stats: &mut Compr
 
 /// Core text compression logic: detects content type and applies appropriate compressor.
 fn compress_text(text: &str, ccr_store: &CcrStore, stats: &mut CompressionStats) -> String {
+    // 1. Try Contextual Delta Encoding for source code files
+    let text = crate::delta::compress_deltas(text, ccr_store);
+
     // Try to parse as JSON first
-    if let Ok(json_val) = serde_json::from_str::<Value>(text) {
+    if let Ok(json_val) = serde_json::from_str::<Value>(&text) {
         if json_val.is_array() || json_val.is_object() {
-            return compress_json_text(&json_val, text, ccr_store, stats);
+            return compress_json_text(&json_val, &text, ccr_store, stats);
         }
     }
 
     // Check if it looks like log output
     let line_count = text.lines().count();
     if line_count >= LOG_LINE_THRESHOLD {
-        return compress_log_text(text, ccr_store, stats);
+        return compress_log_text(&text, ccr_store, stats);
     }
 
     // Not compressible

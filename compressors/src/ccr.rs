@@ -34,6 +34,7 @@ pub struct CcrStore {
 
 struct CcrInner {
     entries: HashMap<String, CcrEntry>,
+    file_states: HashMap<String, String>, // Track per-file state for Contextual Delta Encoding
     db_path: Option<PathBuf>,
     dirty: bool,
 }
@@ -97,6 +98,7 @@ impl CcrStore {
         Ok(Self {
             inner: Arc::new(Mutex::new(CcrInner {
                 entries,
+                file_states: HashMap::new(),
                 db_path: Some(path),
                 dirty: false,
             })),
@@ -108,10 +110,23 @@ impl CcrStore {
         Ok(Self {
             inner: Arc::new(Mutex::new(CcrInner {
                 entries: HashMap::new(),
+                file_states: HashMap::new(),
                 db_path: None,
                 dirty: false,
             })),
         })
+    }
+
+    /// Gets the most recent state of a file from the session cache for Contextual Delta Encoding.
+    pub fn get_file_state(&self, path: &str) -> Option<String> {
+        let inner = self.inner.lock().unwrap();
+        inner.file_states.get(path).cloned()
+    }
+
+    /// Saves the most recent state of a file in the session cache.
+    pub fn set_file_state(&self, path: &str, content: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.file_states.insert(path.to_string(), content.to_string());
     }
 
     /// Compute the content-addressed handle for a byte slice: `ccr:<sha256_hex>`.
