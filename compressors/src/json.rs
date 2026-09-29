@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::sync::LazyLock;
 use tracing::debug;
 
+use crate::stats::{median_absolute_deviation, percentile};
+
 /// Key in the elision marker: number of elements dropped.
 pub const ELIDED_KEY: &str = "__retoken_elided__";
 
@@ -302,23 +304,6 @@ fn detect_anomalies(arr: &[Value], docs: &[String], z_threshold: f64) -> Vec<usi
     let mut result: Vec<usize> = anomalous.into_iter().collect();
     result.sort_unstable();
     result
-}
-
-/// Computes the median of a slice of f64.
-fn percentile(data: &[f64], p: f64) -> f64 {
-    if data.is_empty() {
-        return 0.0;
-    }
-    let mut sorted = data.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx = (p * (sorted.len() - 1) as f64).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
-
-/// Computes the Median Absolute Deviation of a dataset.
-fn median_absolute_deviation(data: &[f64], median: f64) -> f64 {
-    let deviations: Vec<f64> = data.iter().map(|x| (x - median).abs()).collect();
-    percentile(&deviations, 0.5)
 }
 
 /// Original simple compressor (null stripping) preserved for backward compatibility.
