@@ -21,24 +21,10 @@ pub fn compress_messages(body: &mut Value, ccr_store: &CcrStore, stats: &mut Com
 
     for msg in messages.iter_mut() {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
-        let is_tool_result = role == "tool"
-            || msg.get("type").and_then(|t| t.as_str()) == Some("tool_result");
 
         // Process content field
         if let Some(content) = msg.get_mut("content") {
             compress_content_field(content, &role, ccr_store, stats);
-
-            // Anthropic format: content can be an array of content blocks
-            // Handle tool_result content blocks specifically
-            if is_tool_result {
-                if let Some(arr) = content.as_array_mut() {
-                    for block in arr.iter_mut() {
-                        if let Some(text) = block.get_mut("text") {
-                            compress_text_value(text, ccr_store, stats);
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -63,6 +49,14 @@ pub fn compress_content_field(
             for block in blocks.iter_mut() {
                 if let Some(text) = block.get_mut("text") {
                     compress_text_value(text, ccr_store, stats);
+                }
+                
+                // Handle Anthropic tool_result blocks which have a "content" field
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                    if let Some(inner_content) = block.get_mut("content") {
+                        // Recursively compress the inner content
+                        compress_content_field(inner_content, role, ccr_store, stats);
+                    }
                 }
             }
         }
