@@ -31,16 +31,14 @@ pub fn inject_ccr_tool(body: &mut Value) {
 /// Inject the output persona prompt to force terse LLM output.
 /// This is stronger than ReToken's existing terse_mode and specifically
 /// targets credit optimization.
-pub fn inject_output_persona(body: &mut Value) {
-    let persona = "[ReToken proxy active. Terse mode. No pleasantries. Output only actionable code/findings. Call retoken_retrieve if you need full data for a ccr:... handle.]";
-
+pub fn inject_output_persona(body: &mut Value, persona: &str) {
     // Try OpenAI format first (messages array with system role)
     if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         // Check if we already injected
         let already_injected = messages.iter().any(|m| {
             m.get("content")
                 .and_then(|c| c.as_str())
-                .map(|s| s.contains("ReToken proxy active"))
+                .map(|s| s.contains(persona))
                 .unwrap_or(false)
         });
         if !already_injected {
@@ -58,7 +56,7 @@ pub fn inject_output_persona(body: &mut Value) {
         if let Some(system) = obj.get_mut("system") {
             match system {
                 Value::String(s) => {
-                    if !s.contains("ReToken proxy active") {
+                    if !s.contains(persona) {
                         s.push_str("\n\n");
                         s.push_str(persona);
                     }
@@ -68,7 +66,7 @@ pub fn inject_output_persona(body: &mut Value) {
                         block
                             .get("text")
                             .and_then(|t| t.as_str())
-                            .map(|s| s.contains("ReToken proxy active"))
+                            .map(|s| s.contains(persona))
                             .unwrap_or(false)
                     });
                     if !already {

@@ -7,13 +7,17 @@ use crate::logs::compress_logs;
 use crate::pipeline::CompressionStats;
 
 /// Threshold in bytes for content to be eligible for CCR (store + elide).
-pub const CCR_SIZE_THRESHOLD: usize = 2048;
+pub fn ccr_size_threshold() -> usize {
+    std::env::var("RETOKEN_CCR_SIZE_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(2048)
+}
 
 /// Threshold for log-like content detection (line count).
-pub const LOG_LINE_THRESHOLD: usize = 15;
+pub fn log_line_threshold() -> usize {
+    std::env::var("RETOKEN_LOG_LINE_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(15)
+}
 
 /// Walk the messages array and compress individual message content blocks.
-pub fn compress_messages(body: &mut Value, ccr_store: &CcrStore, stats: &mut CompressionStats) {
+pub fn compress_messages(body: &mut Value, ccr_store: &CcrStore, stats: &mut CompressionStats, elision_note: &str) {
     let messages = match body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(m) => m,
         None => return,
@@ -24,7 +28,7 @@ pub fn compress_messages(body: &mut Value, ccr_store: &CcrStore, stats: &mut Com
 
         // Process content field
         if let Some(content) = msg.get_mut("content") {
-            compress_content_field(content, &role, ccr_store, stats);
+            compress_content_field(content, &role, ccr_store, stats, elision_note);
         }
     }
 }
@@ -35,27 +39,28 @@ pub fn compress_content_field(
     role: &str,
     ccr_store: &CcrStore,
     stats: &mut CompressionStats,
+    elision_note: &str,
 ) {
     match content {
         Value::String(text) => {
             // Don't compress system prompts or short messages
-            if role == "system" || text.len() < CCR_SIZE_THRESHOLD {
+            if role == "system" || text.len() < ccr_size_threshold() {
                 return;
             }
-            let compressed = compress_text(text, ccr_store, stats);
+            let compressed = compress_text(text, ccr_store, stats, elision_note);
             *content = Value::String(compressed);
         }
         Value::Array(blocks) => {
             for block in blocks.iter_mut() {
                 if let Some(text) = block.get_mut("text") {
-                    compress_text_value(text, ccr_store, stats);
+                    compress_text_value(text, ccr_store, stats, elision_note);
                 }
                 
                 // Handle Anthropic tool_result blocks which have a "content" field
                 if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
                     if let Some(inner_content) = block.get_mut("content") {
                         // Recursively compress the inner content
-                        compress_content_field(inner_content, role, ccr_store, stats);
+                        compress_content_field(inner_content, role, ccr_store, stats, elision_note);
                     }
                 }
             }
@@ -65,38 +70,33 @@ pub fn compress_content_field(
 }
 
 /// Compress a text Value in-place.
-pub fn compress_text_value(text: &mut Value, ccr_store: &CcrStore, stats: &mut CompressionStats) {
+pub fn compress_text_value(text: &mut Value, ccr_store: &CcrStore, stats: &mut CompressionStats, elision_note: &str) {
     if let Some(s) = text.as_str() {
-        if s.len() < CCR_SIZE_THRESHOLD {
+        if s.len() < ccr_size_threshold() {
             return;
         }
-        let compressed = compress_text(s, ccr_store, stats);
+        let compressed = compress_text(s, ccr_store, stats, elision_note);
         *text = Value::String(compressed);
     }
 }
 
 /// Core text compression logic: detects content type and applies appropriate compressor.
-pub fn compress_text(text: &str, ccr_store: &CcrStore, stats: &mut CompressionStats) -> String {
-    // 1. AST-Aware Minification: strip comments/blanks from code blocks
+pub fn compress_text(text: &str, ccr_store: &CcrStore, stats: &mut CompressionStats, elision_note: &str) -> String {
     let text = crate::minify::minify_code_blocks(text);
 
-    // 2. Try Contextual Delta Encoding for source code files
     let text = crate::delta::compress_deltas(&text, ccr_store);
 
-    // Try to parse as JSON first
     if let Ok(json_val) = serde_json::from_str::<Value>(&text) {
         if json_val.is_array() || json_val.is_object() {
-            return compress_json_text(&json_val, &text, ccr_store, stats);
+            return compress_json_text(&json_val, &text, ccr_store, stats, elision_note);
         }
     }
 
-    // Check if it looks like log output
     let line_count = text.lines().count();
-    if line_count >= LOG_LINE_THRESHOLD {
+    if line_count >= log_line_threshold() {
         return compress_log_text(&text, ccr_store, stats);
     }
 
-    // Not compressible
     text.to_string()
 }
 
@@ -106,21 +106,20 @@ pub fn compress_json_text(
     original_text: &str,
     ccr_store: &CcrStore,
     stats: &mut CompressionStats,
+    elision_note: &str,
 ) -> String {
-    let (compressed, did_compress) = compress_json_heuristic_tracked(json_val);
+    let (compressed, did_compress) = compress_json_heuristic_tracked(json_val, elision_note);
 
     if !did_compress {
         return original_text.to_string();
     }
 
-    // Store original in CCR
     match ccr_store.store(original_text.as_bytes(), "json") {
         Ok(handle) => {
             stats.ccr_entries_stored += 1;
             stats.json_arrays_collapsed += 1;
             debug!("CCR stored JSON original: {}", handle);
 
-            // Append CCR marker to compressed output
             let mut result = serde_json::to_string(&compressed).unwrap_or_else(|_| original_text.to_string());
             result.push_str(&format!("\n<<{}>>", handle));
             result
@@ -141,14 +140,12 @@ pub fn compress_log_text(text: &str, ccr_store: &CcrStore, stats: &mut Compressi
         return text.to_string(); // No savings
     }
 
-    // Store original in CCR
     match ccr_store.store(text.as_bytes(), "log") {
         Ok(handle) => {
             stats.ccr_entries_stored += 1;
             stats.log_blocks_compressed += 1;
             debug!("CCR stored log original: {}", handle);
 
-            // Append CCR marker
             format!("{}\n<<{}>>", compressed, handle)
         }
         Err(e) => {

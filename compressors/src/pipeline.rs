@@ -38,6 +38,9 @@ impl CompressionStats {
 pub fn run_pipeline(
     body: &mut Value,
     ccr_store: &CcrStore,
+    is_stream: bool,
+    persona_prompt: &str,
+    elision_note: &str,
 ) -> CompressionStats {
     let original_bytes = serde_json::to_vec(body).unwrap_or_default();
     let original_size = original_bytes.len();
@@ -51,16 +54,17 @@ pub fn run_pipeline(
         compressed_size: 0,
     };
 
-    // Phase 1: Compress message content (tool results, user messages with logs/JSON)
-    compress_messages(body, ccr_store, &mut stats);
+    // If the request is streaming, we cannot safely intercept tool calls in the response stream.
+    // Thus, we must disable lossy compression (CCR) for streaming requests.
+    if !is_stream {
+        compress_messages(body, ccr_store, &mut stats, elision_note);
 
-    // Phase 2: Inject the retoken_retrieve tool if any CCR entries were stored
-    if stats.ccr_entries_stored > 0 {
-        inject_ccr_tool(body);
+        if stats.ccr_entries_stored > 0 {
+            inject_ccr_tool(body);
+        }
     }
 
-    // Phase 3: Inject output persona
-    inject_output_persona(body);
+    inject_output_persona(body, persona_prompt);
 
     let compressed_bytes = serde_json::to_vec(body).unwrap_or_default();
     stats.compressed_size = compressed_bytes.len();
@@ -109,7 +113,7 @@ mod tests {
             ]
         });
 
-        let stats = run_pipeline(&mut body, &store);
+        let stats = run_pipeline(&mut body, &store, false, "test persona", "test elision");
         assert!(stats.json_arrays_collapsed > 0 || stats.log_blocks_compressed > 0);
         assert!(stats.compressed_size <= stats.original_size);
     }
@@ -136,7 +140,7 @@ mod tests {
             ]
         });
 
-        let stats = run_pipeline(&mut body, &store);
+        let stats = run_pipeline(&mut body, &store, false, "test persona", "test elision");
         assert!(stats.log_blocks_compressed > 0);
     }
 
@@ -154,10 +158,9 @@ mod tests {
             ]
         });
 
-        let stats = run_pipeline(&mut body, &store);
+        let stats = run_pipeline(&mut body, &store, false, "test persona", "test elision");
 
         if stats.ccr_entries_stored > 0 {
-            // Should have injected the tool
             let tools = body.get("tools").and_then(|t| t.as_array());
             assert!(tools.is_some());
             let has_retrieve = tools.unwrap().iter().any(|t| {
@@ -177,13 +180,13 @@ mod tests {
             ]
         });
 
-        run_pipeline(&mut body, &store);
+        run_pipeline(&mut body, &store, false, "test persona", "test elision");
 
         let messages = body.get("messages").unwrap().as_array().unwrap();
         let has_persona = messages.iter().any(|m| {
             m.get("content")
                 .and_then(|c| c.as_str())
-                .map(|s| s.contains("ReToken proxy active"))
+                .map(|s| s.contains("test persona"))
                 .unwrap_or(false)
         });
         assert!(has_persona);

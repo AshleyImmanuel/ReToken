@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::fs;
@@ -6,28 +6,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
-/// A single CCR entry stored on disk.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CcrEntry {
-    /// Base64-encoded original content.
-    content_b64: String,
-    content_type: String,
-    created_at: u64,
-    access_count: u64,
-    size_bytes: usize,
-}
+use crate::ccr::entry::CcrEntry;
+use crate::ccr::paths::dirs_or_default;
 
 /// The ReToken Cache & Recovery (CCR) store.
 ///
 /// A file-backed, content-addressed store that preserves original data before
 /// compression. When the proxy compresses/elides data from a payload, the
-/// original bytes are stored here under a SHA-256 handle. If the LLM needs the
-/// dropped data, it invokes the injected `retoken_retrieve(handle)` tool. The
-/// proxy intercepts this call, fetches from CCR, and returns it -- entirely
-/// transparently to the client.
-///
-/// Uses a `HashMap` with JSON file persistence instead of SQLite, avoiding
-/// native C compiler dependencies.
+/// original bytes are stored here under a SHA-256 handle.
 pub struct CcrStore {
     inner: Arc<Mutex<CcrInner>>,
 }
@@ -245,102 +231,3 @@ impl Drop for CcrStore {
     }
 }
 
-/// The tool schema injected into outbound requests so the LLM can retrieve
-/// elided data. This is a standard OpenAI/Anthropic tool definition.
-pub fn ccr_tool_schema() -> serde_json::Value {
-    serde_json::json!({
-        "name": "retoken_retrieve",
-        "description": "Fetch original data for a given ccr:... handle.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "handle": {
-                    "type": "string",
-                    "description": "CCR handle"
-                }
-            },
-            "required": ["handle"]
-        }
-    })
-}
-
-/// Returns the recovery marker string for embedding in compressed payloads.
-pub fn ccr_marker(handle: &str) -> String {
-    format!("<<ccr:{}>>", handle.strip_prefix("ccr:").unwrap_or(handle))
-}
-
-/// Resolve the default data directory for the CCR database.
-fn dirs_or_default() -> PathBuf {
-    if let Some(data_dir) = std::env::var_os("RETOKEN_DATA_DIR") {
-        return PathBuf::from(data_dir);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(appdata) = std::env::var_os("LOCALAPPDATA") {
-            let mut p = PathBuf::from(appdata);
-            p.push("ReToken");
-            return p;
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        if let Some(home) = std::env::var_os("HOME") {
-            let mut p = PathBuf::from(home);
-            p.push(".retoken");
-            return p;
-        }
-    }
-    PathBuf::from(".")
-}
-
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn store_and_retrieve() {
-        let store = CcrStore::open_in_memory().unwrap();
-        let data = b"hello world this is some test data";
-        let handle = store.store(data, "text").unwrap();
-        assert!(handle.starts_with("ccr:"));
-
-        let retrieved = store.retrieve(&handle).unwrap().unwrap();
-        assert_eq!(retrieved, data);
-    }
-
-    #[test]
-    fn missing_handle_returns_none() {
-        let store = CcrStore::open_in_memory().unwrap();
-        let result = store.retrieve("ccr:nonexistent").unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn duplicate_stores_are_idempotent() {
-        let store = CcrStore::open_in_memory().unwrap();
-        let data = b"same content";
-        let h1 = store.store(data, "text").unwrap();
-        let h2 = store.store(data, "text").unwrap();
-        assert_eq!(h1, h2);
-        assert_eq!(store.count(), 1);
-    }
-
-    #[test]
-    fn handle_is_deterministic() {
-        let h1 = CcrStore::handle(b"test");
-        let h2 = CcrStore::handle(b"test");
-        assert_eq!(h1, h2);
-        let h3 = CcrStore::handle(b"different");
-        assert_ne!(h1, h3);
-    }
-
-    #[test]
-    fn tool_schema_is_valid_json() {
-        let schema = ccr_tool_schema();
-        assert!(schema.get("name").is_some());
-        assert!(schema.get("input_schema").is_some());
-    }
-
-}

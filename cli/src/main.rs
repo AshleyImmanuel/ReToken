@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 
 pub mod wrap;
 pub mod analyze;
+pub mod init;
 
 #[derive(Parser)]
 #[command(name = "retoken")]
@@ -21,6 +22,8 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         path: String,
     },
+    /// Initialize agent configurations (.claudecode, SKILL.md) in the current directory
+    Init,
     /// Wrap an agent or CLI tool, automatically routing its LLM traffic through ReToken
     Wrap {
         /// Optional extra environment variables to override with the proxy URL (e.g. OLLAMA_API_BASE)
@@ -47,6 +50,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Analyze { path } => {
             analyze::run_analyze(path)?;
+        }
+        Commands::Init => {
+            init::run_init()?;
         }
         Commands::Wrap { inject, command } => {
             wrap::run_wrap(inject, command).await?;

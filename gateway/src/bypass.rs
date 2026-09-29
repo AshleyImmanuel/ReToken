@@ -7,19 +7,22 @@ use reqwest::Client;
 use tracing::warn;
 use crate::provider::detect_provider;
 
+use retoken_core::config::AppConfig;
+
 /// Raw passthrough for bypass mode.
 pub async fn forward_raw(
     client: &Client,
     method: axum::http::Method,
     path_and_query: &str,
     req: Request<Body>,
+    config: &AppConfig,
 ) -> Result<Response<Body>, axum::http::StatusCode> {
     // Detect provider even in bypass mode so we route correctly
     let headers: Vec<(String, String)> = req.headers().iter()
         .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
     let provider = detect_provider(path_and_query, &headers);
-    let target_url = format!("{}{}", provider.base_url(), path_and_query);
+    let target_url = format!("{}{}", provider.base_url(config), path_and_query);
 
     let (parts, body) = req.into_parts();
     let mut req_builder = client.request(method, &target_url);

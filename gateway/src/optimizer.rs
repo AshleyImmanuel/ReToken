@@ -22,11 +22,18 @@ pub fn optimize_payload(
     config: &AppConfig,
     record: &mut FlightRecord,
     ccr_store: &CcrStore,
+    is_stream: bool,
 ) -> Vec<u8> {
     // Phase 1: Heuristic compression pipeline
     // This handles: log compression, JSON array collapse, CCR storage,
     // retoken_retrieve tool injection, and output persona injection
-    let pipeline_stats = pipeline::run_pipeline(json_body, ccr_store);
+    let pipeline_stats = pipeline::run_pipeline(
+        json_body,
+        ccr_store,
+        is_stream,
+        &config.persona_prompt,
+        &config.elision_note,
+    );
 
     // Phase 2: Terse mode (if enabled and the pipeline's persona wasn't enough)
     if config.terse_mode {
@@ -40,12 +47,7 @@ pub fn optimize_payload(
         packer::inject_cache_breakpoint(json_body);
     }
 
-    // Phase 4: Compress tool schemas in the request
-    if let Some(tools) = json_body.get_mut("tools").and_then(|t| t.as_array_mut()) {
-        for tool in tools.iter_mut() {
-            strip_tool_descriptions(tool);
-        }
-    }
+    // Phase 4 removed: We cannot strip tool descriptions, as this breaks LLM function calling by removing the context required for the LLM to understand how to use tools.
 
     // Return the optimized bytes
     let optimized = serde_json::to_vec(json_body).unwrap_or_default();
@@ -67,31 +69,3 @@ pub fn optimize_payload(
     optimized
 }
 
-/// Recursively strip "description" fields from JSON schema definitions
-pub fn strip_tool_descriptions(tool: &mut Value) {
-    if let Some(obj) = tool.as_object_mut() {
-        obj.remove("description");
-        if let Some(input_schema) = obj.get_mut("input_schema") {
-            strip_descriptions_recursive(input_schema);
-        }
-        // OpenAI uses "parameters" instead of "input_schema"
-        if let Some(params) = obj.get_mut("parameters") {
-            strip_descriptions_recursive(params);
-        }
-    }
-}
-
-fn strip_descriptions_recursive(value: &mut Value) {
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove("description");
-        obj.remove("examples");
-        for (_, v) in obj.iter_mut() {
-            strip_descriptions_recursive(v);
-        }
-    }
-    if let Some(arr) = value.as_array_mut() {
-        for v in arr.iter_mut() {
-            strip_descriptions_recursive(v);
-        }
-    }
-}

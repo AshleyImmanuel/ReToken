@@ -8,12 +8,14 @@ pub enum Provider {
     Generic { name: String, base_url: String },
 }
 
+use retoken_core::config::AppConfig;
+
 impl Provider {
     /// The base URL for this provider's API.
-    pub fn base_url(&self) -> &str {
+    pub fn base_url<'a>(&'a self, config: &'a AppConfig) -> &'a str {
         match self {
-            Provider::Anthropic => "https://api.anthropic.com",
-            Provider::OpenAI => "https://api.openai.com",
+            Provider::Anthropic => &config.anthropic_base_url,
+            Provider::OpenAI => &config.openai_base_url,
             Provider::Generic { base_url, .. } => base_url.as_str(),
         }
     }
