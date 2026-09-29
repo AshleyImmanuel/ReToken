@@ -66,11 +66,11 @@ pub fn compress_deltas(text: &str, store: &CcrStore) -> String {
             
             debug!("CDE: Compressed {} from {} bytes to {} bytes", path, content.len(), unified.len());
             
-            return format!("<file_diff path=\"{}\">\n{}\n</file_diff>", path, unified);
+            format!("<file_diff path=\"{}\">\n{}\n</file_diff>", path, unified)
         } else {
             // First time seeing this file, save its state but don't compress yet
             store.set_file_state(path, content);
-            return caps.get(0).unwrap().as_str().to_string();
+            caps.get(0).unwrap().as_str().to_string()
         }
     }).to_string();
 
@@ -96,10 +96,10 @@ pub fn compress_deltas(text: &str, store: &CcrStore) -> String {
             
             debug!("CDE: Compressed {} from {} bytes to {} bytes", path, content.len(), unified.len());
             
-            return format!("```diff\n{}\n```", unified);
+            format!("```diff\n{}\n```", unified)
         } else {
             store.set_file_state(path, content);
-            return caps.get(0).unwrap().as_str().to_string();
+            caps.get(0).unwrap().as_str().to_string()
         }
     }).to_string();
 

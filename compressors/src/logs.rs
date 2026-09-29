@@ -67,12 +67,12 @@ pub fn compress_logs_heuristic(log: &str, keep_head: usize, keep_tail: usize) ->
     let mut keep = vec![false; n];
 
     // Head anchors
-    for i in 0..keep_head.min(n) {
-        keep[i] = true;
+    for item in keep.iter_mut().take(keep_head.min(n)) {
+        *item = true;
     }
     // Tail anchors
-    for i in n.saturating_sub(keep_tail)..n {
-        keep[i] = true;
+    for item in keep.iter_mut().take(n).skip(n.saturating_sub(keep_tail)) {
+        *item = true;
     }
     // Signal lines
     for (i, line) in lines.iter().enumerate() {

@@ -265,31 +265,31 @@ fn intercept_ccr_tool_calls(resp_bytes: &[u8], ccr_store: &CcrStore) -> Vec<u8> 
     // Check for tool_use in Anthropic format: content array with type "tool_use"
     if let Some(content) = resp_json.get_mut("content").and_then(|c| c.as_array_mut()) {
         for block in content.iter_mut() {
-            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                if block.get("name").and_then(|n| n.as_str()) == Some("retoken_retrieve") {
-                    if let Some(handle_str) = block
-                        .get("input")
-                        .and_then(|i| i.get("handle"))
-                        .and_then(|h| h.as_str())
-                        .map(|s| s.to_string())
-                    {
-                        match ccr_store.retrieve(&handle_str) {
-                            Ok(Some(data)) => {
-                                let content_str = String::from_utf8_lossy(&data);
-                                // Replace the tool_use block with a text block containing the data
-                                *block = serde_json::json!({
-                                    "type": "text",
-                                    "text": format!("[ReToken CCR Recovery]\n{}", content_str)
-                                });
-                                intercepted = true;
-                                info!("CCR intercepted: resolved handle {}", handle_str);
-                            }
-                            Ok(None) => {
-                                warn!("CCR handle not found: {}", handle_str);
-                            }
-                            Err(e) => {
-                                warn!("CCR retrieval error for {}: {}", handle_str, e);
-                            }
+            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                && block.get("name").and_then(|n| n.as_str()) == Some("retoken_retrieve")
+            {
+                if let Some(handle_str) = block
+                    .get("input")
+                    .and_then(|i| i.get("handle"))
+                    .and_then(|h| h.as_str())
+                    .map(|s| s.to_string())
+                {
+                    match ccr_store.retrieve(&handle_str) {
+                        Ok(Some(data)) => {
+                            let content_str = String::from_utf8_lossy(&data);
+                            // Replace the tool_use block with a text block containing the data
+                            *block = serde_json::json!({
+                                "type": "text",
+                                "text": format!("[ReToken CCR Recovery]\n{}", content_str)
+                            });
+                            intercepted = true;
+                            info!("CCR intercepted: resolved handle {}", handle_str);
+                        }
+                        Ok(None) => {
+                            warn!("CCR handle not found: {}", handle_str);
+                        }
+                        Err(e) => {
+                            warn!("CCR retrieval error for {}: {}", handle_str, e);
                         }
                     }
                 }

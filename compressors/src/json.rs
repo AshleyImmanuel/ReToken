@@ -128,11 +128,11 @@ fn select_array(arr: &[Value], config: &JsonCompressorConfig, collapsed: &mut bo
     let mut keep = vec![false; n];
 
     // 1. Head/tail anchors
-    for i in 0..config.keep_first.min(n) {
-        keep[i] = true;
+    for item in keep.iter_mut().take(config.keep_first.min(n)) {
+        *item = true;
     }
-    for i in n.saturating_sub(config.keep_last)..n {
-        keep[i] = true;
+    for item in keep.iter_mut().take(n).skip(n.saturating_sub(config.keep_last)) {
+        *item = true;
     }
 
     // 2. Error-state elements (force-kept)
@@ -271,7 +271,7 @@ fn detect_anomalies(arr: &[Value], docs: &[String], z_threshold: f64) -> Vec<usi
 
     let mut anomalous = std::collections::HashSet::new();
 
-    for (_path, values) in &fields_by_path {
+    for values in fields_by_path.values() {
         // Only consider paths that cover most elements (at least half)
         if values.len() < n / 2 {
             continue;
