@@ -250,13 +250,13 @@ impl Drop for CcrStore {
 pub fn ccr_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "retoken_retrieve",
-        "description": "Retrieve original data that was compressed by the ReToken proxy. Use this when you see a CCR handle (ccr:...) or a __retoken_elided__ marker and need the full original content.",
+        "description": "Fetch original data for a given ccr:... handle.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "handle": {
                     "type": "string",
-                    "description": "The CCR handle (ccr:<hash>) of the data to retrieve."
+                    "description": "CCR handle"
                 }
             },
             "required": ["handle"]

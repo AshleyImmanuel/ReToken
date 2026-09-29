@@ -183,7 +183,7 @@ mod tests {
         let has_persona = messages.iter().any(|m| {
             m.get("content")
                 .and_then(|c| c.as_str())
-                .map(|s| s.contains("credit-optimized proxy"))
+                .map(|s| s.contains("ReToken proxy active"))
                 .unwrap_or(false)
         });
         assert!(has_persona);

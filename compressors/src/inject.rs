@@ -32,12 +32,7 @@ pub fn inject_ccr_tool(body: &mut Value) {
 /// This is stronger than ReToken's existing terse_mode and specifically
 /// targets credit optimization.
 pub fn inject_output_persona(body: &mut Value) {
-    let persona = "You are communicating through a credit-optimized proxy. \
-                    Do not use pleasantries. Do not explain your code unless asked. \
-                    Output actionable findings and code blocks only. \
-                    Be as terse as possible to conserve API credits. \
-                    If you see __retoken_elided__ markers or <<ccr:...>> handles, \
-                    use the retoken_retrieve tool to fetch the original data when needed.";
+    let persona = "[ReToken proxy active. Terse mode. No pleasantries. Output only actionable code/findings. Call retoken_retrieve if you need full data for a ccr:... handle.]";
 
     // Try OpenAI format first (messages array with system role)
     if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
@@ -45,7 +40,7 @@ pub fn inject_output_persona(body: &mut Value) {
         let already_injected = messages.iter().any(|m| {
             m.get("content")
                 .and_then(|c| c.as_str())
-                .map(|s| s.contains("credit-optimized proxy"))
+                .map(|s| s.contains("ReToken proxy active"))
                 .unwrap_or(false)
         });
         if !already_injected {
@@ -63,7 +58,7 @@ pub fn inject_output_persona(body: &mut Value) {
         if let Some(system) = obj.get_mut("system") {
             match system {
                 Value::String(s) => {
-                    if !s.contains("credit-optimized proxy") {
+                    if !s.contains("ReToken proxy active") {
                         s.push_str("\n\n");
                         s.push_str(persona);
                     }
@@ -73,7 +68,7 @@ pub fn inject_output_persona(body: &mut Value) {
                         block
                             .get("text")
                             .and_then(|t| t.as_str())
-                            .map(|s| s.contains("credit-optimized proxy"))
+                            .map(|s| s.contains("ReToken proxy active"))
                             .unwrap_or(false)
                     });
                     if !already {
