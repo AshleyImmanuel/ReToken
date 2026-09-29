@@ -4,27 +4,43 @@ use retrieval::packer;
 use crate::provider::Provider;
 use retoken_core::recorder::FlightRecord;
 use retoken_core::config::AppConfig;
+use compressors::ccr::CcrStore;
+use compressors::pipeline;
 
 /// Applies all structural optimizations to the request payload before forwarding to the provider.
+///
+/// Optimization pipeline (in order):
+/// 1. Caveman compression pipeline (log compressor, JSON array collapse with MAD, CCR storage,
+///    retoken_retrieve tool injection, output persona injection)
+/// 2. Terse mode system prompt injection (if enabled and not already injected by pipeline)
+/// 3. Anthropic cache reordering + breakpoint injection
+/// 4. Tool schema description stripping
 pub fn optimize_payload(
     json_body: &mut Value,
     original_size: usize,
     detected_provider: &Provider,
     config: &AppConfig,
     record: &mut FlightRecord,
+    ccr_store: &CcrStore,
 ) -> Vec<u8> {
+    // Phase 1: Caveman compression pipeline
+    // This handles: log compression, JSON array collapse, CCR storage,
+    // retoken_retrieve tool injection, and output persona injection
+    let pipeline_stats = pipeline::run_pipeline(json_body, ccr_store);
+
+    // Phase 2: Terse mode (if enabled and the pipeline's persona wasn't enough)
     if config.terse_mode {
         packer::inject_terse_mode(json_body);
     }
 
-    // FIX #8 + #1: Reorder messages for provider cache optimization
+    // Phase 3: Reorder messages for provider cache optimization
     // Only apply for Anthropic since their API supports cache_control
     if *detected_provider == Provider::Anthropic {
         packer::reorder_for_cache(json_body);
         packer::inject_cache_breakpoint(json_body);
     }
 
-    // FIX #10: Compress tool schemas in the request
+    // Phase 4: Compress tool schemas in the request
     if let Some(tools) = json_body.get_mut("tools").and_then(|t| t.as_array_mut()) {
         for tool in tools.iter_mut() {
             strip_tool_descriptions(tool);
@@ -39,8 +55,13 @@ pub fn optimize_payload(
         let ratio = 1.0 - (optimized_size as f64 / original_size as f64);
         record.compression_ratio = Some(ratio);
         record.context_reduction = Some(ratio);
-        info!("Optimized request: {} -> {} bytes ({:.1}% reduction)", 
-            original_size, optimized_size, ratio * 100.0);
+        info!(
+            "Optimized request: {} -> {} bytes ({:.1}% reduction) | pipeline: logs={} json={} ccr={}",
+            original_size, optimized_size, ratio * 100.0,
+            pipeline_stats.log_blocks_compressed,
+            pipeline_stats.json_arrays_collapsed,
+            pipeline_stats.ccr_entries_stored
+        );
     }
     
     optimized

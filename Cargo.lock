@@ -318,7 +318,12 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 name = "compressors"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "regex",
+ "serde",
  "serde_json",
+ "sha2",
+ "tracing",
 ]
 
 [[package]]
@@ -496,6 +501,7 @@ dependencies = [
  "analyzers",
  "anyhow",
  "axum",
+ "compressors",
  "http-body-util",
  "reqwest",
  "retoken_core",

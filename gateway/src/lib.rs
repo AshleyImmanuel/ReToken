@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 use retoken_core::state::StateEngine;
 use retoken_core::cache::ResponseCache;
 use retoken_core::config::AppConfig;
+use compressors::ccr::CcrStore;
 
 pub mod provider;
 pub mod optimizer;
@@ -24,11 +25,16 @@ pub fn app(state_engine: Arc<Mutex<StateEngine>>, config: AppConfig) -> Router {
         ResponseCache::new(config.cache_ttl_secs, config.max_cache_entries)
     ));
 
+    let ccr_store = Arc::new(
+        CcrStore::open(None).expect("Failed to initialize CCR store")
+    );
+
     let state = Arc::new(GatewayState {
         client: Client::new(),
         state_engine,
         response_cache,
         config,
+        ccr_store,
     });
 
     Router::new()
