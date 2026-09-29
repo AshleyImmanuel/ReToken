@@ -78,7 +78,7 @@ pub fn inject_cache_breakpoint(request_body: &mut Value) {
 }
 
 /// Dynamically injects an ultra-compact brevity instruction to slash output tokens 
-/// and reduce model generation latency, acting as a lightweight "Caveman mode".
+/// and reduce model generation latency, acting as a lightweight "heuristic mode".
 pub fn inject_terse_mode(request_body: &mut Value) {
     let messages = match request_body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(m) => m,

@@ -92,7 +92,7 @@ pub async fn handler(
         }
     }
 
-    // Apply Optimizations (now with Caveman pipeline)
+    // Apply Optimizations (now with heuristic pipeline)
     let final_bytes = if let Some(ref mut body_json) = json_body {
         optimizer::optimize_payload(
             body_json,

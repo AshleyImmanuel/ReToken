@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use tracing::debug;
 
 /// Compiled regex matching lines worth keeping: errors, failures, warnings,
-/// stack-trace frames, file locations. Ported from Caveman's Go `importantLineRe`
+/// stack-trace frames, file locations. Ported from legacy proxy `importantLineRe`
 /// and extended with Rust-specific patterns (.rs:line, thread 'main' panicked).
 static IMPORTANT_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -13,7 +13,7 @@ static IMPORTANT_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Pre-filter literal set for fast rejection. If the lowercased line contains
 /// none of these, it cannot match the full regex -- skip the expensive match.
-/// This is the same optimisation Caveman applies in `importantLogLine()`.
+/// This is the same optimisation applied in `importantLogLine()`.
 const FAST_LITERALS: &[&str] = &[
     "error", "fatal", "panic", "exception", "traceback",
     "fail", "warn", ".go:", ".rs:", ".py:", ".js:", ".ts:",
@@ -43,7 +43,7 @@ static LOG_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"lines elided \(retoken\)").expect("LOG_MARKER_RE must compile")
 });
 
-/// Compresses log/command output using Caveman-style heuristics:
+/// Compresses log/command output using advanced heuristics:
 ///
 /// 1. Keep the first `keep_head` and last `keep_tail` lines for context.
 /// 2. Keep any line matching the critical-signal regex (errors, stack traces,
@@ -51,10 +51,10 @@ static LOG_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// 3. Keep any line that is an existing elision marker (idempotency).
 /// 4. Collapse consecutive unmatched lines into `... [N] lines elided (retoken) ...`.
 ///
-/// This is a **strict superset** of Caveman's `logCompressor` -- it additionally
+/// This is a **strict superset** of the legacy `logCompressor` -- it additionally
 /// detects Rust panics, .rs/.py/.js/.ts file locations, and handles mixed
 /// important/unimportant runs more efficiently.
-pub fn compress_logs_caveman(log: &str, keep_head: usize, keep_tail: usize) -> String {
+pub fn compress_logs_heuristic(log: &str, keep_head: usize, keep_tail: usize) -> String {
     let lines: Vec<&str> = log.lines().collect();
     let n = lines.len();
 
@@ -114,9 +114,9 @@ pub fn compress_logs_caveman(log: &str, keep_head: usize, keep_tail: usize) -> S
     result
 }
 
-/// Convenience wrapper with Caveman defaults (keep first 2, last 2).
+/// Convenience wrapper with legacy defaults (keep first 2, last 2).
 pub fn compress_logs(log: &str) -> String {
-    compress_logs_caveman(log, 2, 2)
+    compress_logs_heuristic(log, 2, 2)
 }
 
 #[cfg(test)]

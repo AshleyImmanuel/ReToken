@@ -17,7 +17,7 @@ struct CcrEntry {
     size_bytes: usize,
 }
 
-/// The Caveman Cache & Recovery (CCR) store.
+/// The ReToken Cache & Recovery (CCR) store.
 ///
 /// A file-backed, content-addressed store that preserves original data before
 /// compression. When the proxy compresses/elides data from a payload, the

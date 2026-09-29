@@ -10,7 +10,7 @@ use compressors::pipeline;
 /// Applies all structural optimizations to the request payload before forwarding to the provider.
 ///
 /// Optimization pipeline (in order):
-/// 1. Caveman compression pipeline (log compressor, JSON array collapse with MAD, CCR storage,
+/// 1. Heuristic compression pipeline (log compressor, JSON array collapse with MAD, CCR storage,
 ///    retoken_retrieve tool injection, output persona injection)
 /// 2. Terse mode system prompt injection (if enabled and not already injected by pipeline)
 /// 3. Anthropic cache reordering + breakpoint injection
@@ -23,7 +23,7 @@ pub fn optimize_payload(
     record: &mut FlightRecord,
     ccr_store: &CcrStore,
 ) -> Vec<u8> {
-    // Phase 1: Caveman compression pipeline
+    // Phase 1: Heuristic compression pipeline
     // This handles: log compression, JSON array collapse, CCR storage,
     // retoken_retrieve tool injection, and output persona injection
     let pipeline_stats = pipeline::run_pipeline(json_body, ccr_store);

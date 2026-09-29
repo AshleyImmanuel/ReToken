@@ -2,7 +2,7 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 use crate::ccr::CcrStore;
-use crate::json::compress_json_caveman_tracked;
+use crate::json::compress_json_heuristic_tracked;
 use crate::logs::compress_logs;
 
 /// Threshold in bytes for content to be eligible for CCR (store + elide).
@@ -11,7 +11,7 @@ const CCR_SIZE_THRESHOLD: usize = 2048;
 /// Threshold for log-like content detection (line count).
 const LOG_LINE_THRESHOLD: usize = 15;
 
-/// The full Caveman-style compression pipeline applied to an LLM API request body.
+/// The full heuristic compression pipeline applied to an LLM API request body.
 ///
 /// This orchestrates all compressors in the correct order:
 /// 1. Walk the `messages` array, detecting tool results and large text blocks
@@ -182,7 +182,7 @@ fn compress_json_text(
     ccr_store: &CcrStore,
     stats: &mut CompressionStats,
 ) -> String {
-    let (compressed, did_compress) = compress_json_caveman_tracked(json_val);
+    let (compressed, did_compress) = compress_json_heuristic_tracked(json_val);
 
     if !did_compress {
         return original_text.to_string();

@@ -10,7 +10,7 @@ pub const ELIDED_KEY: &str = "__retoken_elided__";
 pub const ELIDED_NOTE_KEY: &str = "__retoken_note__";
 
 /// Matches object keys whose subtrees carry error/warning signal and must be
-/// preserved verbatim. Ported from Caveman's `errorKeyRe`.
+/// preserved verbatim. Ported from legacy `errorKeyRe`.
 static ERROR_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(error|errors|message|msg|stack|stacktrace|stack_trace|trace|traceback|exception|reason|detail|details|warning|warnings)$")
         .expect("ERROR_KEY_RE must compile")
@@ -18,7 +18,7 @@ static ERROR_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Matches critical keywords anywhere in an element's canonical JSON, so items
 /// in an error/failure state are force-kept regardless of position. Ported from
-/// Caveman's `errorValueRe` and extended.
+/// legacy `errorValueRe` and extended.
 static ERROR_VALUE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(error|errors|exception|failed|failure|critical|fatal|crash|panic|abort|timeout|denied|rejected|refused|broken|segfault)\b")
         .expect("ERROR_VALUE_RE must compile")
@@ -55,14 +55,14 @@ impl Default for JsonCompressorConfig {
 /// - Recursive error-key preservation
 /// - Elision markers that are valid JSON objects
 /// - Idempotency (already-elided arrays pass through)
-pub fn compress_json_caveman(value: &Value) -> Value {
+pub fn compress_json_heuristic(value: &Value) -> Value {
     let config = JsonCompressorConfig::default();
     let mut collapsed = false;
     transform(value, false, &config, &mut collapsed)
 }
 
 /// Returns (compressed_value, did_compress).
-pub fn compress_json_caveman_tracked(value: &Value) -> (Value, bool) {
+pub fn compress_json_heuristic_tracked(value: &Value) -> (Value, bool) {
     let config = JsonCompressorConfig::default();
     let mut collapsed = false;
     let result = transform(value, false, &config, &mut collapsed);
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn small_arrays_pass_through() {
         let input = json!([1, 2, 3, 4, 5]);
-        let result = compress_json_caveman(&input);
+        let result = compress_json_heuristic(&input);
         assert_eq!(result, input);
     }
 
@@ -354,7 +354,7 @@ mod tests {
             .map(|i| json!({"id": i, "status": "ok", "value": 100}))
             .collect();
         let input = Value::Array(arr);
-        let (result, did_compress) = compress_json_caveman_tracked(&input);
+        let (result, did_compress) = compress_json_heuristic_tracked(&input);
         assert!(did_compress);
         // Should contain elision markers
         let result_str = serde_json::to_string(&result).unwrap();
@@ -370,7 +370,7 @@ mod tests {
         arr[15] = json!({"id": 15, "status": "failed", "reason": "timeout"});
 
         let input = Value::Array(arr);
-        let result = compress_json_caveman(&input);
+        let result = compress_json_heuristic(&input);
         let result_str = serde_json::to_string(&result).unwrap();
         assert!(result_str.contains("disk full"));
         assert!(result_str.contains("timeout"));
@@ -385,7 +385,7 @@ mod tests {
         arr[12] = json!({"response_time": 50000, "status": "ok"});
 
         let input = Value::Array(arr);
-        let result = compress_json_caveman(&input);
+        let result = compress_json_heuristic(&input);
         let result_str = serde_json::to_string(&result).unwrap();
         assert!(result_str.contains("50000"));
     }
@@ -396,7 +396,7 @@ mod tests {
             "data": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
             "errors": ["err1", "err2", "err3", "err4", "err5", "err6", "err7", "err8", "err9", "err10"]
         });
-        let result = compress_json_caveman(&input);
+        let result = compress_json_heuristic(&input);
         // The "errors" key subtree should be fully preserved
         let errors = result.get("errors").unwrap().as_array().unwrap();
         assert_eq!(errors.len(), 10);
@@ -408,8 +408,8 @@ mod tests {
             .map(|i| json!({"id": i, "val": 42}))
             .collect();
         let input = Value::Array(arr);
-        let first = compress_json_caveman(&input);
-        let second = compress_json_caveman(&first);
+        let first = compress_json_heuristic(&input);
+        let second = compress_json_heuristic(&first);
         assert_eq!(first, second);
     }
 }
