@@ -158,8 +158,11 @@ fn compress_text_value(text: &mut Value, ccr_store: &CcrStore, stats: &mut Compr
 
 /// Core text compression logic: detects content type and applies appropriate compressor.
 fn compress_text(text: &str, ccr_store: &CcrStore, stats: &mut CompressionStats) -> String {
-    // 1. Try Contextual Delta Encoding for source code files
-    let text = crate::delta::compress_deltas(text, ccr_store);
+    // 1. AST-Aware Minification: strip comments/blanks from code blocks
+    let text = crate::minify::minify_code_blocks(text);
+
+    // 2. Try Contextual Delta Encoding for source code files
+    let text = crate::delta::compress_deltas(&text, ccr_store);
 
     // Try to parse as JSON first
     if let Ok(json_val) = serde_json::from_str::<Value>(&text) {
