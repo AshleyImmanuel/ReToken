@@ -280,7 +280,14 @@ fn detect_anomalies(arr: &[Value], docs: &[String], z_threshold: f64) -> Vec<usi
         let mad = median_absolute_deviation(&nums, median);
 
         if mad < 1e-10 {
-            continue; // all values identical -- no anomalies possible
+            // MAD is 0, meaning the majority of elements are exactly the median.
+            // Any element that differs from the median is infinitely anomalous.
+            for &(idx, val) in values {
+                if (val - median).abs() > 1e-10 {
+                    anomalous.insert(idx);
+                }
+            }
+            continue;
         }
 
         // Modified z-score: 0.6745 * (x - median) / MAD

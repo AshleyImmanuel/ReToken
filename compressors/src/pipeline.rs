@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn pipeline_compresses_large_tool_output() {
         let store = test_store();
-        let big_array: Vec<Value> = (0..30)
+        let big_array: Vec<Value> = (0..200)
             .map(|i| json!({"file": format!("src/file_{}.rs", i), "size": 1024, "status": "ok"}))
             .collect();
 
@@ -354,9 +354,9 @@ mod tests {
     #[test]
     fn pipeline_compresses_log_output() {
         let store = test_store();
-        let log_lines: Vec<String> = (0..50)
+        let log_lines: Vec<String> = (0..200)
             .map(|i| {
-                if i == 25 {
+                if i == 100 {
                     "ERROR: failed to compile module".to_string()
                 } else {
                     format!("  Compiling dep_{} v0.1.0", i)
