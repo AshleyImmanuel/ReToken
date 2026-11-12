@@ -32,9 +32,18 @@ impl Task {
     }
 
     /// Executes the task asynchronously.
-    /// In a production ReToken environment, SandboxMode::Virtual would use an isolated container.
+    /// In this MVP, native execution is used when SandboxMode::Native is configured.
+    /// SandboxMode::Virtual is not silently executed on host without isolation; it fails with an explicit error.
     pub async fn execute(&mut self) -> Result<(), String> {
         self.status = TaskStatus::Running;
+
+        if self.sandbox_mode == SandboxMode::Virtual {
+            self.status = TaskStatus::Failed;
+            self.output =
+                "Virtual sandbox execution is not supported in this runtime (container isolation required)"
+                    .to_string();
+            return Err("Virtual sandbox execution is not supported in this runtime".to_string());
+        }
 
         let mut cmd_parts = self.command.split_whitespace();
         let program = cmd_parts.next().ok_or("Empty command")?;
@@ -96,5 +105,16 @@ mod tests {
         let res = task.execute().await;
         assert!(res.is_err());
         assert_eq!(task.status, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn test_task_execute_virtual_sandbox_rejected() {
+        let mut task = Task::new("t2".into(), "echo hello".into(), SandboxMode::Virtual);
+        let res = task.execute().await;
+        assert!(res.is_err());
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert!(task
+            .output
+            .contains("Virtual sandbox execution is not supported"));
     }
 }

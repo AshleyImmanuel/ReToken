@@ -11,16 +11,11 @@ pub struct FlightRecord {
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,
     pub cached_tokens: Option<usize>,
-    pub tool_calls: usize,
-    pub tool_duration_ms: u64,
     pub network_duration_ms: u64,
-    pub ttft_ms: Option<u64>,
-    pub generation_duration_ms: Option<u64>,
     pub cache_hits: usize,
     pub cache_misses: usize,
     pub compression_ratio: Option<f64>,
     pub context_reduction: Option<f64>,
-    pub agent_turns: usize,
     pub errors: usize,
     pub final_success: Option<bool>,
 }
@@ -37,18 +32,32 @@ impl Default for FlightRecord {
             input_tokens: None,
             output_tokens: None,
             cached_tokens: None,
-            tool_calls: 0,
-            tool_duration_ms: 0,
             network_duration_ms: 0,
-            ttft_ms: None,
-            generation_duration_ms: None,
             cache_hits: 0,
             cache_misses: 0,
             compression_ratio: None,
             context_reduction: None,
-            agent_turns: 0,
             errors: 0,
             final_success: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_flight_record_default_and_serialization() {
+        let record = FlightRecord::default();
+        assert_eq!(record.provider, "unknown");
+        assert_eq!(record.errors, 0);
+        assert!(record.input_tokens.is_none());
+
+        let json = serde_json::to_string(&record).expect("serialization should succeed");
+        let deserialized: FlightRecord =
+            serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(deserialized.task_id, record.task_id);
+        assert_eq!(deserialized.session_id, record.session_id);
     }
 }

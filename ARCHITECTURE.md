@@ -6,7 +6,7 @@ ReToken is a local proxy sitting between agentic IDEs (Cursor, Windsurf, RooCode
 
 The workspace is divided into specialized Rust crates:
 
-### 1. `gateway` & `proxy`
+### 1. `gateway`
 The core HTTP interceptor listening on `127.0.0.1:8888` (configurable):
 - **Provider Detection & URL Normalization**: Routes requests to OpenAI, Anthropic, or generic upstream endpoints based on paths (`/v1/messages`, `/v1/chat/completions`) and headers, normalizing `/v1` path prefixes.
 - **Upstream Validation**: Enforces valid `http`/`https` schemes with non-empty hosts on custom upstream URLs, preventing unsafe forwarding.

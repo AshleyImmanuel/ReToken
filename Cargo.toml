@@ -5,9 +5,9 @@ members = [
     "retrieval",
     "scheduler",
     "gateway",
-    "proxy",
-    "cli"
-, "compressors"]
+    "cli",
+    "compressors",
+]
 resolver = "2"
 
 [workspace.dependencies]

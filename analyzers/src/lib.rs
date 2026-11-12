@@ -3,6 +3,5 @@ pub mod graph;
 pub mod scanner;
 pub mod symbols;
 
-pub fn init() {
-    // analyzers logic
-}
+pub use graph::{DependencyGraph, FileNode};
+pub use scanner::Scanner;

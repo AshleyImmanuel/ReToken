@@ -82,7 +82,7 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 
 ## Architecture Overview
 
-- **`gateway` & `proxy`**: The core `axum` HTTP proxy handling incoming requests, provider routing, URL normalization, cache lookups, and response processing.
+- **`gateway`**: The core `axum` HTTP proxy handling incoming requests, provider routing, URL normalization, cache lookups, and response processing.
 - **`compressors`**: Heuristic parsers for log slicing, JSON array collapsing with MAD anomaly detection, base64 roundtripping, and content-addressed CCR storage.
 - **`core`**: Configuration (`AppConfig`), exact response caching (`ResponseCache`), in-memory session state tracking (`StateEngine`), and telemetry metrics (`FlightRecord`).
 - **`retrieval`**: Context budgeting (`ContextPackage`), dependency-aware ranking (`ContextPlanner`), and cache breakpoint formatting (`packer`).

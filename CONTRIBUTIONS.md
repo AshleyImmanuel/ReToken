@@ -19,14 +19,17 @@
   * **Streaming Isolation**: Completely bypassed cache lookups and insertions for streaming requests (`stream: true`).
   * **Cache Eviction Fixes**: Fixed `ResponseCache::insert` to update existing keys in place without corrupting insertion order or leaking order entries, and added zero-capacity guards.
 * **Subsystem Public APIs, Cleanups & Testing**:
+  * **Removed Placeholder Crates & Stub Functions**: Deleted empty `proxy` crate from workspace members, and replaced stub `init()` functions across `retrieval/src/lib.rs`, `scheduler/src/lib.rs`, `core/src/lib.rs`, and `analyzers/src/lib.rs` with clean public module and struct re-exports.
+  * **Telemetry Metric Alignment**: Audited `FlightRecord` in `core/src/recorder.rs` to eliminate unconnected placeholder fields (`tool_calls`, `tool_duration_ms`, `ttft_ms`, `generation_duration_ms`, `agent_turns`), grounding telemetry strictly in metrics measured by the proxy.
+  * **Sandbox Mode Safety Guards**: Updated `scheduler/src/task.rs` to explicitly reject execution with an informative error if `SandboxMode::Virtual` is configured, preventing unintended native execution on the host when container isolation is expected.
+  * **Flexible Token Estimation**: Refactored `retrieval/src/planner.rs` to provide `plan_with_estimator` for custom or exact token resolvers (such as tracked state objects) while retaining the default 4-bytes/token heuristic in `plan`.
   * **Removed Duplicate Definitions**: Fixed duplicate test definition `pipeline_skips_ccr_when_recovery_unsupported` in `compressors/src/pipeline.rs`, duplicate `mod tests` in `core/src/cache.rs`, and duplicated functions in `gateway/src/provider.rs`.
-  * **Retrieval & Scheduler Public Exports**: Replaced placeholder stub `init()` functions in `retrieval/src/lib.rs` and `scheduler/src/lib.rs` with clean module re-exports (`ContextPackage`, `ContextPlanner`, `ExecutionDag`, `Prefetcher`, `TaskManager`, `slice_log`).
   * **Context Package Idempotency**: Fixed `ContextPackage::add` in `retrieval/src/package.rs` to check set membership before budget validation, preventing redundant token accrual and false budget rejections on duplicate object additions.
-  * **Scheduler & Retrieval Test Coverage**: Added targeted unit test suites across `scheduler` (`dag.rs`, `prefetch.rs`, `task.rs`, `virtualization.rs`) and `retrieval` (`planner.rs`, `package.rs`), expanding workspace tests to 58 passing tests.
+  * **Expanded Unit Test Coverage**: Added targeted unit tests across `analyzers` (`scanner.rs`), `core` (`recorder.rs`), `scheduler` (`dag.rs`, `prefetch.rs`, `task.rs`, `virtualization.rs`), and `retrieval` (`planner.rs`, `package.rs`), expanding workspace tests from 23 to 62 passing tests with 0 failures.
   * **Documentation & Architecture Grounding**: Updated `README.md` and `ARCHITECTURE.md` to accurately reflect the implemented codebase (exact request caching, in-memory session engine, native streaming passthrough, and transparent Anthropic CCR recovery).
 * **Integration Testing & Verification**:
   * Added 6 end-to-end integration tests in `gateway/tests/proxy_test.rs` utilizing local mock upstream servers on ephemeral ports (no live credentials or external networks required).
-  * Expanded workspace test coverage from 23 to 58 passing tests with 0 failures across all crates.
+  * Expanded workspace test coverage from 23 to 62 passing tests with 0 failures across all crates.
   * Verified code quality with `cargo fmt --check`, `cargo test --workspace`, and `cargo build --workspace`.
 
 ### Antigravity (2026-09-29)

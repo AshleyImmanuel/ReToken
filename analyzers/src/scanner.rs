@@ -32,3 +32,16 @@ impl Scanner {
         files
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scanner_finds_source_files() {
+        let scanner = Scanner::new(PathBuf::from("src"));
+        let files = scanner.scan();
+        // Since we are running in the analyzers crate, src/lib.rs, scanner.rs, etc. exist
+        assert!(files.iter().any(|f| f.ends_with("scanner.rs")));
+    }
+}
