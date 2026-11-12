@@ -1306,3 +1306,98 @@ fn withdraw(amount: u64) {
         .contains("CRITICAL_LOGIC_NOTE: must check caller permissions before withdrawal"));
     assert!(forwarded_str.contains("SECURITY_INVARIANT: balance cannot underflow"));
 }
+
+#[tokio::test]
+async fn test_openai_codex_prefix_caching_canonicalization() {
+    let captured_body = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let cap_clone = captured_body.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/chat/completions",
+        post(move |req: Request<Body>| {
+            let cap = cap_clone.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *cap.lock().await = bytes.to_vec();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"Done."}}]}"#,
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.openai_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.prompt_caching_enabled = true; // Enable prefix optimization
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let payload = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "user", "content": "Refactor this function."},
+            {"role": "system", "content": "You are Codex, an expert coding assistant."}
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "run_tests", "description": "Run unit tests"}
+            },
+            {
+                "type": "function",
+                "function": {"name": "apply_patch", "description": "Apply code patch"}
+            },
+            {
+                "type": "function",
+                "function": {"name": "analyze_ast", "description": "Analyze AST"}
+            }
+        ]
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer sk-test")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let forwarded_bytes = captured_body.lock().await.clone();
+    let forwarded_json: serde_json::Value = serde_json::from_slice(&forwarded_bytes).unwrap();
+
+    // 1. Verify system message moved to index 0 for stable prefix
+    let messages = forwarded_json["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(
+        messages[0]["content"],
+        "You are Codex, an expert coding assistant."
+    );
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "Refactor this function.");
+
+    // 2. Verify tools deterministically sorted by name to guarantee automatic server-side prefix cache hit
+    let tools = forwarded_json["tools"].as_array().unwrap();
+    assert_eq!(tools[0]["function"]["name"], "analyze_ast");
+    assert_eq!(tools[1]["function"]["name"], "apply_patch");
+    assert_eq!(tools[2]["function"]["name"], "run_tests");
+}

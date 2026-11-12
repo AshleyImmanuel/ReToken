@@ -163,7 +163,8 @@ pub async fn handler(
     // Apply Optimizations: when all optimizations are disabled, preserve raw client bytes bit-for-bit
     let optimizations_active = state.config.compression_enabled
         || state.config.terse_mode
-        || (detected_provider == Provider::Anthropic && state.config.prompt_caching_enabled);
+        || ((detected_provider == Provider::Anthropic || detected_provider == Provider::OpenAI)
+            && state.config.prompt_caching_enabled);
 
     let final_bytes = if optimizations_active {
         if let Some(ref mut body_json) = json_body {

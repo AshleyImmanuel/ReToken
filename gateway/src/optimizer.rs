@@ -56,10 +56,18 @@ pub fn optimize_payload(
         compressors::inject::inject_output_persona_for_provider(json_body, persona, is_anthropic);
     }
 
-    // Phase 2: Provider-specific cache optimization (Anthropic prompt caching, opt-in)
-    if is_anthropic && config.prompt_caching_enabled {
-        packer::reorder_for_cache(json_body);
-        packer::inject_cache_breakpoint(json_body);
+    // Phase 2: Provider-specific prefix cache optimization (Anthropic & OpenAI/Codex, opt-in)
+    if config.prompt_caching_enabled {
+        match detected_provider {
+            Provider::Anthropic => {
+                packer::reorder_for_cache(json_body);
+                packer::inject_cache_breakpoint(json_body);
+            }
+            Provider::OpenAI => {
+                packer::optimize_openai_prefix(json_body);
+            }
+            _ => {}
+        }
     }
 
     // Return the optimized bytes

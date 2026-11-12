@@ -164,6 +164,56 @@ pub fn inject_terse_mode(request_body: &mut Value) {
     }
 }
 
+/// Canonicalizes an OpenAI / Codex request payload for automatic server-side prefix caching without altering semantics.
+///
+/// OpenAI's prompt caching automatically caches prefixes >= 1,024 tokens.
+/// To maximize cache hits across consecutive turns:
+/// 1. Canonicalizes the `tools` array by sorting functions deterministically by name.
+/// 2. Ensures the `developer` or `system` message is placed at index 0 of `messages`.
+///
+/// This does not drop or alter a single token of user instructions, code, comments, or tool parameters.
+pub fn optimize_openai_prefix(request_body: &mut Value) {
+    // 1. Deterministically sort tools by function name
+    if let Some(tools) = request_body.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        tools.sort_by(|a, b| {
+            let name_a = a
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or_default();
+            let name_b = b
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or_default();
+            name_a.cmp(name_b)
+        });
+    }
+
+    // 2. Ensure system/developer message is at index 0 of messages
+    if let Some(messages) = request_body
+        .get_mut("messages")
+        .and_then(|m| m.as_array_mut())
+    {
+        let mut system_idx = None;
+        for (i, msg) in messages.iter().enumerate() {
+            if let Some(role) = msg.get("role").and_then(|r| r.as_str()) {
+                if role == "system" || role == "developer" {
+                    system_idx = Some(i);
+                    break;
+                }
+            }
+        }
+
+        if let Some(idx) = system_idx {
+            if idx > 0 {
+                let sys_msg = messages.remove(idx);
+                messages.insert(0, sys_msg);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +283,43 @@ mod tests {
         // Messages should NOT have cache_control on the message object
         let msgs = body["messages"].as_array().unwrap();
         assert!(msgs[0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn test_optimize_openai_prefix_canonicalization() {
+        let mut body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "Analyze code."},
+                {"role": "system", "content": "You are a code assistant."}
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "write_file", "description": "Write a file"}
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "diff_file", "description": "Diff a file"}
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "read_file", "description": "Read a file"}
+                }
+            ]
+        });
+
+        optimize_openai_prefix(&mut body);
+
+        // System message must be moved to index 0
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[1]["role"], "user");
+
+        // Tools must be sorted alphabetically by function name
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["function"]["name"], "diff_file");
+        assert_eq!(tools[1]["function"]["name"], "read_file");
+        assert_eq!(tools[2]["function"]["name"], "write_file");
     }
 }
