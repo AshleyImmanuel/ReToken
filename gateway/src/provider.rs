@@ -439,6 +439,12 @@ pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUs
                 .get("cache_read_input_tokens")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
+            usage.reasoning_tokens = usage_obj
+                .get("output_tokens_details")
+                .and_then(|d| d.get("thinking_tokens"))
+                .or_else(|| usage_obj.get("thinking_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
         }
         Provider::OpenAI => {
             usage.input_tokens = usage_obj
@@ -469,6 +475,24 @@ pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUs
             usage.output_tokens = usage_obj
                 .get("output_tokens")
                 .or_else(|| usage_obj.get("completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            usage.cached_tokens = usage_obj
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .or_else(|| usage_obj.get("cache_read_input_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            usage.reasoning_tokens = usage_obj
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .or_else(|| {
+                    usage_obj
+                        .get("output_tokens_details")
+                        .and_then(|d| d.get("thinking_tokens"))
+                })
+                .or_else(|| usage_obj.get("reasoning_tokens"))
+                .or_else(|| usage_obj.get("thinking_tokens"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
         }
@@ -652,6 +676,7 @@ mod tests {
         assert!(!is_sensitive_header("Accept"));
         assert!(!is_sensitive_header("User-Agent"));
     }
+
     #[test]
     fn test_extract_token_usage_openai_reasoning_tokens() {
         let response = serde_json::json!({
@@ -674,5 +699,40 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(800));
         assert_eq!(usage.cached_tokens, Some(1024));
         assert_eq!(usage.reasoning_tokens, Some(600));
+    }
+
+    #[test]
+    fn test_extract_token_usage_anthropic_thinking_tokens() {
+        let response = serde_json::json!({
+            "id": "msg_01X999",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "Analyzing AST...",
+                    "signature": "sig123"
+                },
+                {
+                    "type": "text",
+                    "text": "Here is the refactored code."
+                }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 420,
+                "output_tokens": 1200,
+                "cache_read_input_tokens": 300,
+                "output_tokens_details": {
+                    "thinking_tokens": 850
+                }
+            }
+        });
+        let body = serde_json::to_vec(&response).unwrap();
+        let usage = extract_token_usage(&Provider::Anthropic, &body);
+        assert_eq!(usage.input_tokens, Some(420));
+        assert_eq!(usage.output_tokens, Some(1200));
+        assert_eq!(usage.cached_tokens, Some(300));
+        assert_eq!(usage.reasoning_tokens, Some(850));
     }
 }

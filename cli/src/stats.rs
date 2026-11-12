@@ -124,7 +124,7 @@ pub async fn run_stats() -> anyhow::Result<()> {
                 println!("    Cached Tokens Saved: {}", cached_tokens);
                 if reasoning_tokens > 0 {
                     println!(
-                        "    Reasoning Tokens (o1/o3/thinking): {}",
+                        "    Reasoning / Thinking Tokens (o1/o3/Claude thinking): {}",
                         reasoning_tokens
                     );
                 }
