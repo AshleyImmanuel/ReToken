@@ -27,6 +27,7 @@ pub fn app_with_client(
     let response_cache = Arc::new(Mutex::new(ResponseCache::new(
         config.cache_ttl_secs,
         config.max_cache_entries,
+        config.max_cache_bytes,
     )));
     let telemetry = Arc::new(Mutex::new(retoken_core::FlightTelemetry::new()));
 

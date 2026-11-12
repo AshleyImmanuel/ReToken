@@ -26,6 +26,8 @@ pub async fn admin_cache_list(
             "status": "ok",
             "count": entries.len(),
             "max_capacity": cache.max_entries(),
+            "max_bytes": cache.max_bytes(),
+            "current_bytes": cache.current_bytes(),
             "entries": entries,
         })),
     )
@@ -93,6 +95,8 @@ pub async fn admin_stats(
             "cache_enabled": state.config.cache_enabled,
             "cached_entries": cache.len(),
             "max_cache_entries": cache.max_entries(),
+            "max_cache_bytes": cache.max_bytes(),
+            "current_cache_bytes": cache.current_bytes(),
             "total_hits": cache.total_hits,
             "total_misses": cache.total_misses,
             "total_requests": tel.total_requests,

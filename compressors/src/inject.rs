@@ -61,6 +61,10 @@ pub fn inject_ccr_tool(body: &mut Value) {
 
 /// Inject the output persona prompt to force terse LLM output, respecting provider protocols.
 pub fn inject_output_persona_for_provider(body: &mut Value, persona: &str, is_anthropic: bool) {
+    if persona.trim().is_empty() {
+        return;
+    }
+
     if is_anthropic {
         // Anthropic: system prompt MUST be placed in top-level "system" field
         if let Some(obj) = body.as_object_mut() {

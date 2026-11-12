@@ -11,8 +11,17 @@ pub async fn run_stats() -> anyhow::Result<()> {
     println!("  Cache Enabled: {}", config.cache_enabled);
     println!("  Cache TTL: {}s", config.cache_ttl_secs);
     println!("  Max Cache Entries: {}", config.max_cache_entries);
+    println!(
+        "  Max Cache Memory: {} MB",
+        config.max_cache_bytes / (1024 * 1024)
+    );
     println!("  Token Budget: {}", config.token_budget);
     println!("  Terse Mode: {}", config.terse_mode);
+    println!(
+        "  Compression Enabled: {} (lossless default)",
+        config.compression_enabled
+    );
+    println!("  CCR Enabled: {}", config.ccr_enabled);
     println!(
         "  Max Request Body Size: {} MB",
         config.max_request_body_bytes / (1024 * 1024)

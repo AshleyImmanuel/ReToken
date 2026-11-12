@@ -7,18 +7,13 @@ static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?sm)(<file(?:_diff)?\s+path=[^>]*>\n?)(.*?)(\n?</file(?:_diff)?>)|(^```[a-zA-Z0-9_\-]*\n)(.*?)(\n?```)").unwrap()
 });
 
-// Safely match line comments that are the ONLY thing on the line (ignoring whitespace).
-// This prevents accidental stripping of "http://" inside strings.
-// Ignores doc comments (///, //!) and our own markers (// [ReToken).
-static LINE_COMMENT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^[ \t]*//(.*)$").unwrap());
-
 // Collapse multiple blank lines into a single blank line
 static MULTI_BLANK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^\s*\n(\s*\n)+").unwrap());
 
-/// AST-Aware Code Minification (Heuristic-based for safety and zero-latency).
-/// Strips non-essential comments and excessive whitespace from code blocks.
+/// Whitespace minification for code blocks.
+/// Collapses excessive blank lines while strictly preserving all developer comments,
+/// docstrings, and syntax explaining behavior or security constraints.
 pub fn minify_code_blocks(text: &str) -> String {
     CODE_BLOCK_RE
         .replace_all(text, |caps: &Captures| {
@@ -43,27 +38,12 @@ pub fn minify_code_blocks(text: &str) -> String {
 
             let orig_len = content.len();
 
-            // 1. Strip full-line comments (that are not doc comments)
-            content = LINE_COMMENT_RE
-                .replace_all(&content, |caps: &Captures| {
-                    let inner = caps.get(1).unwrap().as_str();
-                    if inner.starts_with('/')
-                        || inner.starts_with('!')
-                        || inner.starts_with(" [ReToken")
-                    {
-                        caps.get(0).unwrap().as_str().to_string()
-                    } else {
-                        "".to_string()
-                    }
-                })
-                .to_string();
-
-            // 2. Collapse multiple blank lines into a single blank line
+            // Collapse multiple blank lines into a single blank line (preserve comments intact)
             content = MULTI_BLANK_RE.replace_all(&content, "\n").to_string();
 
             if content.len() < orig_len {
                 debug!(
-                    "Heuristic Minifier: Compressed block from {} to {} bytes",
+                    "Whitespace Minifier: Collapsed blank lines from {} to {} bytes",
                     orig_len,
                     content.len()
                 );
@@ -79,14 +59,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_minify_removes_comments_and_blanks() {
+    fn test_minify_preserves_comments_and_collapses_blanks() {
         let code = r#"```rust
 fn main() {
-    // This is a useless comment
+    // This comment explains critical behavior
     let x = 1;
 
 
-    // Another one
+    // Security constraint: must validate bounds
     let y = 2;
     // [ReToken: Keep this]
     let url = "http://google.com"; // Keep this too
@@ -96,12 +76,13 @@ fn main() {
 }
 ```"#;
         let minified = minify_code_blocks(code);
-        assert!(!minified.contains("useless comment"));
-        assert!(!minified.contains("Another one"));
+        // All developer comments must be strictly preserved
+        assert!(minified.contains("This comment explains critical behavior"));
+        assert!(minified.contains("Security constraint: must validate bounds"));
         assert!(minified.contains("[ReToken: Keep this]"));
         assert!(minified.contains("http://google.com"));
         assert!(minified.contains("Keep this too"));
-        // Check that double blank lines were collapsed
+        // Multiple blank lines must be collapsed
         assert!(!minified.contains("let x = 1;\n\n\n"));
     }
 }

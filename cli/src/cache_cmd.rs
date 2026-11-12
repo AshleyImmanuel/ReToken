@@ -17,7 +17,11 @@ pub async fn run_cache(cmd: Option<CacheCommands>) -> anyhow::Result<()> {
             println!("====================");
             println!("  Cache Enabled: {}", config.cache_enabled);
             println!("  TTL: {}s", config.cache_ttl_secs);
-            println!("  Max Capacity: {} entries", config.max_cache_entries);
+            println!(
+                "  Max Capacity: {} entries ({} MB limit)",
+                config.max_cache_entries,
+                config.max_cache_bytes / (1024 * 1024)
+            );
             println!(
                 "  Isolation Policy: SHA-256 context fingerprint + upstream base + context hash"
             );
@@ -42,9 +46,19 @@ pub async fn run_cache(cmd: Option<CacheCommands>) -> anyhow::Result<()> {
                         } else {
                             0.0
                         };
+                        let cached_entries = json["cached_entries"].as_u64().unwrap_or(0);
+                        let current_bytes = json["current_cache_bytes"].as_u64().unwrap_or(0);
+                        let max_bytes = json["max_cache_bytes"]
+                            .as_u64()
+                            .unwrap_or(config.max_cache_bytes as u64);
 
                         println!("Live Gateway Cache State:");
-                        println!("  Cached Entries: {}", json["cached_entries"]);
+                        println!(
+                            "  Cached Entries: {} (Memory: {:.2} MB / {:.2} MB)",
+                            cached_entries,
+                            current_bytes as f64 / (1024.0 * 1024.0),
+                            max_bytes as f64 / (1024.0 * 1024.0)
+                        );
                         println!("  Total Hits: {}", hits);
                         println!("  Total Misses: {}", misses);
                         println!("  Hit Ratio: {:.1}%", hit_pct);

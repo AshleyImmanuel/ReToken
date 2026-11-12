@@ -2,6 +2,21 @@
 
 ## Agent Contributions
 
+### Antigravity (2026-11-12 - Quality & Operational Safeguards)
+* **Model Reasoning & Prompt Context Protection**:
+  * **Lossless Pass-Through by Default**: Added `compression_enabled` (default `false`) and `ccr_enabled` (default `false`) to `AppConfig`, ensuring that requests are passed through completely losslessly by default.
+  * **Strict Role Boundaries**: Updated `compressors/src/process.rs` so that lossy compression is strictly restricted to tool outputs (`role == "tool"` or `type == "tool_result"`). User prompts, system messages, and assistant reasoning history are never elided or truncated.
+  * **Code Comment Preservation**: Removed comment stripping in `compressors/src/minify.rs`. Developer comments explaining code behavior, assumptions, and security constraints (`//`) are now 100% preserved.
+  * **Opt-In Terse Mode**: Changed `terse_mode` default from `true` to `false` in `AppConfig`, eliminating unwanted prompt persona injection that pushed the model toward extreme brevity.
+  * **Safe CCR Guardrails**: Disabled CCR elision and fictitious retrieval tool injection by default (`ccr_enabled: false`) to avoid breaking the model's multi-turn reasoning cycle.
+* **Hard Total Cache Memory Limit**:
+  * Added `max_cache_bytes` to `AppConfig` (default 256 MB) and implemented byte-budget tracking (`current_bytes`) in `ResponseCache`.
+  * The cache now enforces both max entry count AND hard total memory budget, automatically evicting oldest entries when either threshold is exceeded.
+* **Telemetry & CLI Updates**:
+  * Updated `admin_stats`, `retoken stats`, and `retoken cache status` to display live cache memory consumption and capacity limits.
+* **Expanded Verification**:
+  * Added integration tests verifying lossless pass-through of comments, multi-line prose, and byte-budget eviction.
+
 ### Antigravity (2026-11-12 - Continued)
 * **Connect-Time SSRF Validation & Destination IP Pinning**:
   * Implemented `resolve_and_verify_destination` in `gateway/src/provider.rs` and integrated destination resolution into `gateway/src/handler/mod.rs`.

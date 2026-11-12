@@ -10,13 +10,13 @@
 
 ## Core Features (MVP)
 
-- **Provider-Aware Terse Mode Injection**: Injects concise instructions into top-level system prompts (Anthropic) or system messages (OpenAI) without corrupting provider API schemas.
-- **Exact-Hash Request Caching**: Hashes full request context (HTTP method, endpoint path, provider name, upstream URL, request payload, repo hash, and non-transport headers) to serve duplicate requests instantly with configurable TTL and LRU eviction.
-- **Contextual Compression & Recovery (CCR)**: Safely compresses repetitive payloads (logs, large uniform JSON arrays) and stores originals in a local content-addressed CCR store with transparent retrieval for Anthropic requests.
-- **Connect-Time SSRF Validation & IP Pinning**: Enforces strict destination safety for custom upstreams, blocking loopback, private subnets, carrier-grade NAT, benchmark subnets, and cloud metadata. Pins verified socket addresses at connection time to prevent TOCTOU DNS rebinding.
+- **Lossless Default with Quality Preservation**: User prompts, system instructions, assistant reasoning history, and code comments (`//`) are strictly preserved bit-for-bit. Lossy compression (`compression_enabled`) and terse mode (`terse_mode`) are disabled by default.
+- **Exact-Hash Response Caching**: Hashes full request context (HTTP method, endpoint path, provider name, upstream URL, request payload, repo hash, and non-transport headers) to serve duplicate requests instantly with configurable TTL and LRU eviction.
+- **Dual Limit Cache Memory Protection**: Cache is constrained by both entry count (`max_cache_entries`, default 1024) and total memory budget (`max_cache_bytes`, default 256MB), preventing memory exhaustion.
+- **Connect-Time SSRF Validation & IP Pinning**: Enforces strict destination safety for custom upstreams, blocking loopback, private subnets, carrier-grade NAT, benchmark subnets, and cloud metadata. Pins verified socket destinations at connection time to eliminate TOCTOU DNS rebinding risks.
 - **Bounded Request & Response Buffering**: Caches and buffers are bounded by configurable byte limits (`max_request_body_bytes` and `max_response_body_bytes`, default 10MB each), protecting against memory exhaustion.
 - **Dual Request/Response Streaming Detection**: Automatically bypasses caching and buffering when `stream: true` is requested or when upstream returns `Content-Type: text/event-stream`.
-- **Partial Configuration with Serde Defaults**: Supports minimal config files (e.g. `{"port": 9000}`) with explicit error reporting on invalid environment variables.
+- **Partial Configuration with Serde Defaults**: Supports minimal config files (e.g. `{"port": 9000}`) with explicit warning reports on invalid environment variables.
 
 ---
 
@@ -106,7 +106,9 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 - **Conservative Context & Credential Cache Isolation**: Cache keys incorporate the upstream base URL, request method, endpoint path, request payload, repository hash, and a SHA-256 fingerprint encompassing credentials (`Authorization`, `x-api-key`, `api-key`, `x-goog-api-key`), version headers, and any custom client headers (excluding only hop-by-hop transport headers and proxy control headers).
 - **Administrative Endpoints & Telemetry**: The running gateway daemon exposes loopback administrative routes `POST /_retoken/cache/clear`, `GET /_retoken/cache` (active entry listing), `DELETE /_retoken/cache?key=<k>` (single entry invalidation), and `GET /_retoken/stats` (live telemetry).
 - **Cache Opt-Out**: Requests with `Cache-Control: no-cache`, `no-store`, `Pragma: no-cache`, or `x-retoken-cache: false` bypass cache lookup and storage entirely.
-- **Request and Response Size Limits**: Request body size is capped by `RETOKEN_MAX_REQUEST_BODY_BYTES` (default 10 MB, returning 413 on exceed). Non-streaming response body size is capped by `RETOKEN_MAX_RESPONSE_BODY_BYTES` (default 10 MB, returning 502 on exceed). Network requests to upstream providers enforce a strict safety timeout (`upstream_timeout_secs`, default 60s).
+- **Request, Response, and Cache Memory Budgets**: Request body size is capped by `RETOKEN_MAX_REQUEST_BODY_BYTES` (default 10 MB, returning 413 on exceed). Non-streaming response body size is capped by `RETOKEN_MAX_RESPONSE_BODY_BYTES` (default 10 MB, returning 502 on exceed). Total response cache memory is strictly capped by `RETOKEN_MAX_CACHE_BYTES` (default 256 MB) alongside entry capacity (`RETOKEN_MAX_CACHE_ENTRIES`, default 1024), preventing memory leaks.
+- **Prompt & Reasoning Preservation**: User prompts, system messages, assistant history, and code comments are preserved bit-for-bit without elision or comment stripping. Lossy compression (`compression_enabled`) and terse mode (`terse_mode`) are disabled by default. Contextual Compression and Retrieval (CCR) is opt-in (`ccr_enabled`) to ensure model reasoning loops remain unhindered.
+- **Upstream Timeouts**: Network requests to upstream providers enforce a strict safety timeout (`upstream_timeout_secs`, default 60s).
 
 ---
 

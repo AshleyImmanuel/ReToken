@@ -22,7 +22,8 @@ pub fn log_line_threshold() -> usize {
         .unwrap_or(15)
 }
 
-/// Walk the messages array and compress individual message content blocks.
+/// Walk the messages array and compress ONLY clearly identified tool output blocks.
+/// User prompts, system messages, and assistant reasoning history are strictly preserved intact.
 pub fn compress_messages(
     body: &mut Value,
     ccr_store: &CcrStore,
@@ -35,31 +36,38 @@ pub fn compress_messages(
     };
 
     for msg in messages.iter_mut() {
-        let role = msg
-            .get("role")
-            .and_then(|r| r.as_str())
-            .unwrap_or("")
-            .to_string();
+        let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
 
-        // Process content field
-        if let Some(content) = msg.get_mut("content") {
-            compress_content_field(content, &role, ccr_store, stats, elision_note);
+        // 1. OpenAI tool result message: role == "tool"
+        if role == "tool" {
+            if let Some(content) = msg.get_mut("content") {
+                compress_tool_content(content, ccr_store, stats, elision_note);
+            }
+        } else if let Some(content_array) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+            // 2. Anthropic tool result blocks inside messages: block type == "tool_result"
+            for block in content_array.iter_mut() {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                    if let Some(inner) = block.get_mut("content") {
+                        compress_tool_content(inner, ccr_store, stats, elision_note);
+                    }
+                }
+            }
         }
+        // User messages (role == "user"), assistant messages (role == "assistant"),
+        // and system messages (role == "system") are NEVER touched.
     }
 }
 
-/// Compress a content field (string or array of content blocks).
-pub fn compress_content_field(
+/// Compress tool content (string or array of text blocks).
+pub fn compress_tool_content(
     content: &mut Value,
-    role: &str,
     ccr_store: &CcrStore,
     stats: &mut CompressionStats,
     elision_note: &str,
 ) {
     match content {
         Value::String(text) => {
-            // Don't compress system prompts or short messages
-            if role == "system" || text.len() < ccr_size_threshold() {
+            if text.len() < ccr_size_threshold() {
                 return;
             }
             let compressed = compress_text(text, ccr_store, stats, elision_note);
@@ -67,36 +75,17 @@ pub fn compress_content_field(
         }
         Value::Array(blocks) => {
             for block in blocks.iter_mut() {
-                if let Some(text) = block.get_mut("text") {
-                    compress_text_value(text, ccr_store, stats, elision_note);
-                }
-
-                // Handle Anthropic tool_result blocks which have a "content" field
-                if block.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
-                    if let Some(inner_content) = block.get_mut("content") {
-                        // Recursively compress the inner content
-                        compress_content_field(inner_content, role, ccr_store, stats, elision_note);
+                if let Some(text_val) = block.get_mut("text") {
+                    if let Some(s) = text_val.as_str() {
+                        if s.len() >= ccr_size_threshold() {
+                            let compressed = compress_text(s, ccr_store, stats, elision_note);
+                            *text_val = Value::String(compressed);
+                        }
                     }
                 }
             }
         }
         _ => {}
-    }
-}
-
-/// Compress a text Value in-place.
-pub fn compress_text_value(
-    text: &mut Value,
-    ccr_store: &CcrStore,
-    stats: &mut CompressionStats,
-    elision_note: &str,
-) {
-    if let Some(s) = text.as_str() {
-        if s.len() < ccr_size_threshold() {
-            return;
-        }
-        let compressed = compress_text(s, ccr_store, stats, elision_note);
-        *text = Value::String(compressed);
     }
 }
 

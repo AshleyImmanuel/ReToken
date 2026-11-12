@@ -920,3 +920,99 @@ fn test_connect_time_ssrf_destination_pinning() {
     // With allow_private = true (e.g. testing mode)
     assert!(resolve_and_verify_destination("127.0.0.1", 80, true).is_ok());
 }
+
+#[tokio::test]
+async fn test_default_preserves_comments_and_prose_losslessly() {
+    let captured_body = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let cap_clone = captured_body.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let cap = cap_clone.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *cap.lock().await = bytes.to_vec();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"m1","content":[{"type":"text","text":"ok"}]}"#,
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    // Default config has terse_mode = false, compression_enabled = false, ccr_enabled = false
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let code_with_comments = r#"```rust
+// Security constraint: must validate caller permissions
+fn process_payment(user: &User) {
+    // Audit log before state transition
+    log_audit(user);
+    // Line 1
+    // Line 2
+    // Line 3
+    // Line 4
+    // Line 5
+    // Line 6
+    // Line 7
+    // Line 8
+    // Line 9
+    // Line 10
+    // Line 11
+    // Line 12
+    // Line 13
+    // Line 14
+    // Line 15
+    execute();
+}
+```"#;
+
+    let payload = serde_json::json!({
+        "model": "claude-3-opus",
+        "messages": [
+            {"role": "user", "content": code_with_comments}
+        ]
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let forwarded_bytes = captured_body.lock().await.clone();
+    let forwarded_str = String::from_utf8_lossy(&forwarded_bytes);
+
+    // Comments must NOT be stripped
+    assert!(forwarded_str.contains("Security constraint: must validate caller permissions"));
+    assert!(forwarded_str.contains("Audit log before state transition"));
+    // Middle lines must NOT be elided
+    assert!(forwarded_str.contains("// Line 7"));
+    // Terse persona must NOT be injected by default
+    assert!(!forwarded_str.contains("ReToken Terse Mode"));
+    assert!(!forwarded_str.contains("Caveman"));
+}

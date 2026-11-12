@@ -11,7 +11,14 @@ pub struct AppConfig {
     pub cache_ttl_secs: u64,
     /// Maximum number of entries the cache will hold before evicting oldest.
     pub max_cache_entries: usize,
+    /// Hard total memory limit for the cache in bytes before evicting oldest (default: 256MB).
+    pub max_cache_bytes: usize,
+    /// Whether terse mode persona injection is enabled (default: false to preserve model output quality).
     pub terse_mode: bool,
+    /// Whether lossy request compression (log elision, array collapsing) is enabled (default: false).
+    pub compression_enabled: bool,
+    /// Whether Contextual Compression and Retrieval (CCR) handle elision is enabled (default: false).
+    pub ccr_enabled: bool,
     pub port: u16,
 
     /// Maximum request body size in bytes before returning 413 Payload Too Large (default: 10MB).
@@ -65,7 +72,11 @@ impl Default for AppConfig {
             cache_enabled: parse_env_var("RETOKEN_CACHE_ENABLED").unwrap_or(true),
             cache_ttl_secs: parse_env_var("RETOKEN_CACHE_TTL_SECS").unwrap_or(300),
             max_cache_entries: parse_env_var("RETOKEN_MAX_CACHE_ENTRIES").unwrap_or(1024),
-            terse_mode: parse_env_var("RETOKEN_TERSE_MODE").unwrap_or(true),
+            max_cache_bytes: parse_env_var("RETOKEN_MAX_CACHE_BYTES")
+                .unwrap_or(256 * 1024 * 1024),
+            terse_mode: parse_env_var("RETOKEN_TERSE_MODE").unwrap_or(false),
+            compression_enabled: parse_env_var("RETOKEN_COMPRESSION_ENABLED").unwrap_or(false),
+            ccr_enabled: parse_env_var("RETOKEN_CCR_ENABLED").unwrap_or(false),
             port: parse_env_var("RETOKEN_PORT").unwrap_or(8888),
             max_request_body_bytes: parse_env_var("RETOKEN_MAX_REQUEST_BODY_BYTES")
                 .unwrap_or(10 * 1024 * 1024),
@@ -131,8 +142,17 @@ impl AppConfig {
         if let Some(v) = parse_env_var("RETOKEN_MAX_CACHE_ENTRIES") {
             self.max_cache_entries = v;
         }
+        if let Some(v) = parse_env_var("RETOKEN_MAX_CACHE_BYTES") {
+            self.max_cache_bytes = v;
+        }
         if let Some(v) = parse_env_var("RETOKEN_TERSE_MODE") {
             self.terse_mode = v;
+        }
+        if let Some(v) = parse_env_var("RETOKEN_COMPRESSION_ENABLED") {
+            self.compression_enabled = v;
+        }
+        if let Some(v) = parse_env_var("RETOKEN_CCR_ENABLED") {
+            self.ccr_enabled = v;
         }
         if let Some(v) = parse_env_var("RETOKEN_PORT") {
             self.port = v;
@@ -182,6 +202,23 @@ mod tests {
         assert!(!config.allow_private_upstreams);
         assert_eq!(config.max_request_body_bytes, 10 * 1024 * 1024);
         assert_eq!(config.max_response_body_bytes, 10 * 1024 * 1024);
+        assert_eq!(config.max_cache_bytes, 256 * 1024 * 1024);
+        assert!(
+            !config.terse_mode,
+            "terse_mode must be false by default to preserve quality"
+        );
+        assert!(
+            !config.compression_enabled,
+            "compression_enabled must be false by default for lossless pass-through"
+        );
+        assert!(
+            !config.ccr_enabled,
+            "ccr_enabled must be false by default to avoid broken retrieval loops"
+        );
+        assert_eq!(config.max_cache_bytes, 256 * 1024 * 1024);
+        assert!(!config.terse_mode, "terse_mode must be false by default to preserve quality");
+        assert!(!config.compression_enabled, "compression_enabled must be false by default for lossless pass-through");
+        assert!(!config.ccr_enabled, "ccr_enabled must be false by default to avoid broken retrieval loops");
         assert_eq!(config.upstream_timeout_secs, 60);
         assert!(config.allowed_upstream_hosts.is_empty());
     }

@@ -20,6 +20,8 @@ pub struct ResponseCache {
     entries: HashMap<String, CacheEntry>,
     ttl: Duration,
     max_entries: usize,
+    max_bytes: usize,
+    current_bytes: usize,
     /// Insertion order tracking for simple eviction without duplicate keys.
     insertion_order: Vec<String>,
     // Counters for telemetry
@@ -27,8 +29,20 @@ pub struct ResponseCache {
     pub total_misses: u64,
 }
 
+fn calculate_entry_size(
+    key: &str,
+    response_bytes: &[u8],
+    response_headers: &[(String, String)],
+) -> usize {
+    let headers_len: usize = response_headers
+        .iter()
+        .map(|(k, v)| k.len() + v.len())
+        .sum();
+    key.len() + response_bytes.len() + headers_len + std::mem::size_of::<CacheEntry>()
+}
+
 impl ResponseCache {
-    pub fn new(ttl_secs: u64, max_entries: usize) -> Self {
+    pub fn new(ttl_secs: u64, max_entries: usize, max_bytes: usize) -> Self {
         Self {
             entries: HashMap::new(),
             ttl: if ttl_secs == 0 {
@@ -37,10 +51,21 @@ impl ResponseCache {
                 Duration::from_secs(ttl_secs)
             },
             max_entries,
+            max_bytes: if max_bytes == 0 {
+                usize::MAX
+            } else {
+                max_bytes
+            },
+            current_bytes: 0,
             insertion_order: Vec::new(),
             total_hits: 0,
             total_misses: 0,
         }
+    }
+
+    /// Convenience constructor for tests with unbounded byte limit.
+    pub fn new_with_entries(ttl_secs: u64, max_entries: usize) -> Self {
+        Self::new(ttl_secs, max_entries, usize::MAX)
     }
 
     /// Compute a cache key including full request context, upstream base URL, and credential isolation (SHA256 hex digest).
@@ -158,7 +183,10 @@ impl ResponseCache {
         };
 
         if expired {
-            self.entries.remove(key);
+            if let Some(entry) = self.entries.remove(key) {
+                let sz = calculate_entry_size(key, &entry.response_bytes, &entry.response_headers);
+                self.current_bytes = self.current_bytes.saturating_sub(sz);
+            }
             self.insertion_order.retain(|k| k != key);
             self.total_misses += 1;
             return None;
@@ -172,7 +200,7 @@ impl ResponseCache {
         self.entries.get(key)
     }
 
-    /// Insert a new cache entry. Evicts the oldest entry if at capacity.
+    /// Insert a new cache entry. Evicts the oldest entries if at entry capacity or byte budget.
     pub fn insert(
         &mut self,
         key: String,
@@ -184,20 +212,40 @@ impl ResponseCache {
             return;
         }
 
-        // If updating an existing key, remove it from insertion_order first
-        if self.entries.contains_key(&key) {
+        let new_size = calculate_entry_size(&key, &response_bytes, &response_headers);
+        if new_size > self.max_bytes {
+            // Cannot fit even if empty
+            return;
+        }
+
+        // If updating an existing key, subtract its previous size
+        if let Some(old_entry) = self.entries.remove(&key) {
+            let old_size =
+                calculate_entry_size(&key, &old_entry.response_bytes, &old_entry.response_headers);
+            self.current_bytes = self.current_bytes.saturating_sub(old_size);
             self.insertion_order.retain(|k| k != &key);
-        } else {
-            // Evict oldest until within capacity
-            while self.entries.len() >= self.max_entries {
-                if !self.insertion_order.is_empty() {
-                    let oldest_key = self.insertion_order.remove(0);
-                    self.entries.remove(&oldest_key);
-                } else if let Some(first_key) = self.entries.keys().next().cloned() {
-                    self.entries.remove(&first_key);
-                } else {
-                    break;
-                }
+        }
+
+        // Evict oldest until within both entry count and byte budget
+        while !self.entries.is_empty()
+            && (self.entries.len() >= self.max_entries
+                || self.current_bytes + new_size > self.max_bytes)
+        {
+            let oldest_key = if !self.insertion_order.is_empty() {
+                self.insertion_order.remove(0)
+            } else if let Some(first_key) = self.entries.keys().next().cloned() {
+                first_key
+            } else {
+                break;
+            };
+
+            if let Some(removed_entry) = self.entries.remove(&oldest_key) {
+                let removed_size = calculate_entry_size(
+                    &oldest_key,
+                    &removed_entry.response_bytes,
+                    &removed_entry.response_headers,
+                );
+                self.current_bytes = self.current_bytes.saturating_sub(removed_size);
             }
         }
 
@@ -209,13 +257,17 @@ impl ResponseCache {
             hit_count: 0,
         };
 
+        self.current_bytes += new_size;
         self.insertion_order.push(key.clone());
         self.entries.insert(key, entry);
     }
 
     /// Invalidate a specific cache entry.
     pub fn invalidate(&mut self, key: &str) {
-        self.entries.remove(key);
+        if let Some(entry) = self.entries.remove(key) {
+            let sz = calculate_entry_size(key, &entry.response_bytes, &entry.response_headers);
+            self.current_bytes = self.current_bytes.saturating_sub(sz);
+        }
         self.insertion_order.retain(|k| k != key);
     }
 
@@ -223,6 +275,7 @@ impl ResponseCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.insertion_order.clear();
+        self.current_bytes = 0;
     }
 
     /// Number of entries currently in the cache.
@@ -235,9 +288,19 @@ impl ResponseCache {
         self.entries.is_empty()
     }
 
-    /// Maximum capacity of the cache.
+    /// Maximum capacity of the cache in entries.
     pub fn max_entries(&self) -> usize {
         self.max_entries
+    }
+
+    /// Hard memory capacity of the cache in bytes.
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    /// Current memory usage of cached entries in bytes.
+    pub fn current_bytes(&self) -> usize {
+        self.current_bytes
     }
 
     /// Returns a list of summaries for all entries currently in the cache.
@@ -422,7 +485,7 @@ mod tests {
 
     #[test]
     fn test_cache_insert_and_hit() {
-        let mut cache = ResponseCache::new(60, 5);
+        let mut cache = ResponseCache::new_with_entries(60, 5);
         let key = "test_key".to_string();
         cache.insert(
             key.clone(),
@@ -447,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_cache_capacity_eviction_lru() {
-        let mut cache = ResponseCache::new(60, 2);
+        let mut cache = ResponseCache::new_with_entries(60, 2);
         cache.insert("k1".into(), b"v1".to_vec(), 200, vec![]);
         cache.insert("k2".into(), b"v2".to_vec(), 200, vec![]);
         assert_eq!(cache.len(), 2);
@@ -462,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_cache_updating_existing_key_does_not_leak_order() {
-        let mut cache = ResponseCache::new(60, 2);
+        let mut cache = ResponseCache::new_with_entries(60, 2);
         cache.insert("k1".into(), b"v1".to_vec(), 200, vec![]);
         cache.insert("k2".into(), b"v2".to_vec(), 200, vec![]);
 
@@ -480,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_cache_ttl_expiry() {
-        let mut cache = ResponseCache::new(1, 10);
+        let mut cache = ResponseCache::new_with_entries(1, 10);
         cache.insert("k1".into(), b"v1".to_vec(), 200, vec![]);
 
         // Manually simulate expiration by setting created_at in the past
@@ -495,9 +558,36 @@ mod tests {
 
     #[test]
     fn test_cache_zero_capacity() {
-        let mut cache = ResponseCache::new(60, 0);
+        let mut cache = ResponseCache::new_with_entries(60, 0);
         cache.insert("k1".into(), b"v1".to_vec(), 200, vec![]);
         assert_eq!(cache.len(), 0);
         assert!(cache.get("k1").is_none());
+    }
+
+    #[test]
+    fn test_cache_byte_budget_eviction() {
+        // Allow up to 10 entries, but with a strict byte limit
+        let mut cache = ResponseCache::new(60, 10, 250);
+
+        let body1 = vec![b'a'; 40];
+        let body2 = vec![b'b'; 40];
+        let body3 = vec![b'c'; 40];
+
+        cache.insert("key1".into(), body1, 200, vec![]);
+        assert_eq!(cache.len(), 1);
+
+        cache.insert("key2".into(), body2, 200, vec![]);
+        assert_eq!(cache.len(), 2);
+
+        // Inserting key3 pushes total bytes above 250 limit, so oldest (key1) is evicted
+        cache.insert("key3".into(), body3, 200, vec![]);
+
+        assert!(
+            cache.get("key1").is_none(),
+            "key1 should be evicted due to byte budget"
+        );
+        assert!(cache.get("key2").is_some());
+        assert!(cache.get("key3").is_some());
+        assert!(cache.current_bytes() <= 250);
     }
 }
