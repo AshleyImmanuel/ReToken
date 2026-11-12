@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command.unwrap_or(Commands::Run) {
         Commands::Run => {
             tracing::info!("ReToken Agent Flight Recorder starting...");
-            let config = retoken_core::config::AppConfig::load();
+            let config = retoken_core::config::AppConfig::load()?;
             gateway::start(config).await?;
         }
         Commands::Analyze { path } => {

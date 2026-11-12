@@ -28,6 +28,7 @@ pub fn app_with_client(
         config.cache_ttl_secs,
         config.max_cache_entries,
     )));
+    let telemetry = Arc::new(Mutex::new(retoken_core::FlightTelemetry::new()));
 
     let state = Arc::new(GatewayState {
         client,
@@ -36,12 +37,18 @@ pub fn app_with_client(
         config,
         ccr_store,
         start_time: std::time::Instant::now(),
+        telemetry,
     });
 
     Router::new()
         .route(
             "/_retoken/cache/clear",
             axum::routing::post(handler::admin::admin_cache_clear),
+        )
+        .route(
+            "/_retoken/cache",
+            axum::routing::get(handler::admin::admin_cache_list)
+                .delete(handler::admin::admin_cache_invalidate),
         )
         .route(
             "/_retoken/stats",

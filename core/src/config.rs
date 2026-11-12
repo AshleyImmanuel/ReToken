@@ -75,42 +75,29 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Loads configuration from `retoken.json` or `.retoken.json` if found,
-    /// then overlays environment variables on top.
-    pub fn load() -> Self {
-        let mut config = Self::load_from_file_or_default();
+    /// Loads configuration from `retoken.json`, `.retoken.json`, or `.retoken/config.json` if found,
+    /// then overlays environment variables on top. Fails loudly if a found configuration file is malformed.
+    pub fn load() -> anyhow::Result<Self> {
+        let mut config = Self::load_from_file_or_default()?;
         config.apply_env_overrides();
-        config
+        Ok(config)
     }
 
-    fn load_from_file_or_default() -> Self {
+    fn load_from_file_or_default() -> anyhow::Result<Self> {
         let candidates = ["retoken.json", ".retoken.json", ".retoken/config.json"];
         for path in &candidates {
             if std::path::Path::new(path).exists() {
-                match std::fs::read_to_string(path) {
-                    Ok(content) => match serde_json::from_str::<AppConfig>(&content) {
-                        Ok(config) => {
-                            tracing::info!("Loaded configuration from {}", path);
-                            return config;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to parse configuration file '{}': {}. Falling back to default configuration.",
-                                path, e
-                            );
-                            eprintln!(
-                                "[WARN] Failed to parse config file '{}': {}. Falling back to default configuration.",
-                                path, e
-                            );
-                        }
-                    },
-                    Err(e) => {
-                        tracing::warn!("Failed to read configuration file '{}': {}", path, e);
-                    }
-                }
+                let content = std::fs::read_to_string(path).map_err(|e| {
+                    anyhow::anyhow!("Failed to read configuration file '{}': {}", path, e)
+                })?;
+                let config = serde_json::from_str::<AppConfig>(&content).map_err(|e| {
+                    anyhow::anyhow!("Configuration file '{}' is malformed: {}", path, e)
+                })?;
+                tracing::info!("Loaded configuration from {}", path);
+                return Ok(config);
             }
         }
-        Self::default()
+        Ok(Self::default())
     }
 
     pub fn apply_env_overrides(&mut self) {
@@ -214,5 +201,12 @@ mod tests {
         let loaded: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.port, 9999);
         assert_eq!(loaded.allowed_upstream_hosts.len(), 2);
+    }
+
+    #[test]
+    fn test_app_config_malformed_json_fails_loudly() {
+        let malformed = "{ \"port\": \"not_a_number\", ";
+        let res = serde_json::from_str::<AppConfig>(malformed);
+        assert!(res.is_err(), "Malformed config JSON must return an Err");
     }
 }

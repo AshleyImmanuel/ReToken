@@ -1,6 +1,6 @@
 use crate::symbols::{SymbolExtractor, SymbolType};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
@@ -65,12 +65,7 @@ impl DependencyGraph {
                     continue;
                 }
                 for import in &target_node.imports {
-                    let path_str = path.to_string_lossy();
-                    if path_str.contains(import.as_str())
-                        || node.exports.contains(import)
-                        || node.functions.contains(import)
-                        || node.classes.contains(import)
-                    {
+                    if matches_import(import, target_path, path, node) {
                         deps.push(path.clone());
                         break;
                     }
@@ -84,17 +79,12 @@ impl DependencyGraph {
     pub fn dependents_of(&self, target_path: &PathBuf) -> Vec<PathBuf> {
         let mut dependents = Vec::new();
         if let Some(target_node) = self.files.get(target_path) {
-            let target_str = target_path.to_string_lossy();
             for (path, node) in &self.files {
                 if path == target_path {
                     continue;
                 }
                 for import in &node.imports {
-                    if target_str.contains(import.as_str())
-                        || target_node.exports.contains(import)
-                        || target_node.functions.contains(import)
-                        || target_node.classes.contains(import)
-                    {
+                    if matches_import(import, path, target_path, target_node) {
                         dependents.push(path.clone());
                         break;
                     }
@@ -103,6 +93,50 @@ impl DependencyGraph {
         }
         dependents
     }
+}
+
+/// Evaluates whether an imported module or symbol matches a candidate file.
+fn matches_import(
+    import: &str,
+    importer_path: &Path,
+    candidate_path: &Path,
+    candidate_node: &FileNode,
+) -> bool {
+    // 1. Exact symbol match: does candidate export or define the imported symbol?
+    if candidate_node.exports.iter().any(|e| e == import)
+        || candidate_node.functions.iter().any(|f| f == import)
+        || candidate_node.classes.iter().any(|c| c == import)
+    {
+        return true;
+    }
+
+    let clean_import = import.trim_start_matches("./").trim_start_matches("../");
+    let leaf = clean_import.rsplit("::").next().unwrap_or(clean_import);
+    let leaf = leaf.rsplit('.').next().unwrap_or(leaf);
+
+    // 2. Relative import matching (e.g. `./utils`, `../helper`)
+    if import.starts_with("./") || import.starts_with("../") {
+        if let Some(parent) = importer_path.parent() {
+            let candidate_norm = candidate_path.to_string_lossy().replace('\\', "/");
+            let resolved = parent.join(import);
+            let resolved_norm = resolved.to_string_lossy().replace('\\', "/");
+            let clean_resolved = resolved_norm.trim_start_matches("./");
+
+            if candidate_norm.contains(clean_resolved) {
+                return true;
+            }
+        }
+    }
+
+    // 3. File stem exact match (e.g. `import helper` matching `helper.rs` or `helper.py`)
+    if let Some(stem) = candidate_path.file_stem() {
+        let stem_str = stem.to_string_lossy();
+        if stem_str == leaf || stem_str == clean_import {
+            return true;
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]

@@ -29,18 +29,27 @@ impl Provider {
     }
 }
 
-/// Returns true if an IPv4 address is loopback, private, link-local, broadcast, or unspecified.
+/// Returns true if an IPv4 address is loopback, private, link-local, broadcast, unspecified, or reserved/testing.
 pub fn is_private_or_loopback_ipv4(ipv4: Ipv4Addr) -> bool {
+    let octets = ipv4.octets();
     ipv4.is_loopback()            // 127.0.0.0/8
         || ipv4.is_private()      // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
         || ipv4.is_link_local()   // 169.254.0.0/16 (e.g. AWS/GCP metadata)
         || ipv4.is_broadcast()    // 255.255.255.255
-        || ipv4.is_unspecified() // 0.0.0.0
+        || ipv4.is_unspecified()  // 0.0.0.0
+        || (octets[0] == 100 && (octets[1] & 0xc0) == 64) // 100.64.0.0/10 Shared Address Space (Carrier-grade NAT)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0) // 192.0.0.0/24 IETF Protocol
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2) // 192.0.2.0/24 TEST-NET-1
+        || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)) // 198.18.0.0/15 Benchmark testing
+        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100) // 198.51.100.0/24 TEST-NET-2
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113) // 203.0.113.0/24 TEST-NET-3
+        || (octets[0] >= 224 && octets[0] <= 239) // 224.0.0.0/4 Multicast
+        || (octets[0] >= 240) // 240.0.0.0/4 Reserved
 }
 
-/// Returns true if an IPv6 address is loopback, unspecified, unique local (ULA), link-local, or IPv4-mapped private.
+/// Returns true if an IPv6 address is loopback, unspecified, unique local (ULA), link-local, multicast, or IPv4-mapped private.
 pub fn is_private_or_loopback_ipv6(ipv6: Ipv6Addr) -> bool {
-    if ipv6.is_loopback() || ipv6.is_unspecified() {
+    if ipv6.is_loopback() || ipv6.is_unspecified() || ipv6.is_multicast() {
         return true;
     }
     // Check for IPv4-mapped IPv6 address (::ffff:x.x.x.x) or IPv4-compatible
@@ -74,6 +83,18 @@ pub fn is_private_or_loopback_ipv6(ipv6: Ipv6Addr) -> bool {
     if (segments[0] & 0xffc0) == 0xfe80 {
         return true;
     }
+    // 2001:db8::/32 Documentation
+    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        return true;
+    }
+    // 100::/64 Discard prefix
+    if segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0 {
+        return true;
+    }
+    // 2001:20::/28 ORCHIDv2
+    if segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020 {
+        return true;
+    }
     false
 }
 
@@ -98,6 +119,9 @@ pub fn is_private_or_loopback_host(host: &str) -> bool {
         || lower.ends_with(".intranet")
         || lower.ends_with(".onion")
         || lower.ends_with(".corp")
+        || lower.ends_with(".home.arpa")
+        || lower.ends_with(".lan")
+        || lower.ends_with(".priv")
     {
         return true;
     }

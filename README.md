@@ -86,10 +86,10 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 | :--- | :--- | :--- |
 | `retoken run` | Implemented | Starts the local HTTP intercepting proxy daemon on `127.0.0.1:8888`. |
 | `retoken wrap <cmd>` | Implemented | Wraps CLI agents (e.g. `claude`, `aider`), injecting proxy endpoints with process readiness checks. |
-| `retoken doctor` | Implemented | Diagnoses local gateway status, port binding, and upstream provider reachability. |
-| `retoken stats` | Implemented | Displays telemetry settings, runtime parameters, and live gateway telemetry. |
-| `retoken cache [action]` | Implemented | Inspects cache capacity/status or purges live daemon cache entries via administrative endpoint. |
-| `retoken analyze [path]` | Implemented | Multi-language heuristic syntax analyzer scanning symbols and dependency graphs (Rust, Python, TS/JS). |
+| `retoken doctor` | Implemented | Diagnoses local gateway status, ping latency, config syntax validity, CCR storage, and provider connectivity. |
+| `retoken stats` | Implemented | Live telemetry dashboard tracking token usage, cache hit ratio, token savings, and data transferred. |
+| `retoken cache [action]` | Implemented | Full cache management: `status`, `inspect`, `clear` (memory + CCR store), or `invalidate <key>`. |
+| `retoken analyze [path]` | Implemented | Comment-aware symbol scanner and principled module/symbol dependency graph resolution (Rust, Python, TS/JS). |
 | `retoken init` | Implemented | Injects ReToken agent guidance skills into `.claudecode` and `.gemini`. |
 | `retoken trace` | Roadmap | Per-request payload inspection and CCR handle resolution tracking. |
 | `retoken benchmark` | Roadmap | End-to-end compression ratio and latency benchmarking against standardized workloads. |
@@ -98,11 +98,11 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 
 ## Security & Operational Controls
 
-- **Configuration File & Environment Overrides**: Automatically loads `retoken.json`, `.retoken.json`, or `.retoken/config.json` from the repository root, with explicit syntax warnings on invalid JSON and seamless environment variable overrides (`RETOKEN_*`).
-- **SSRF Protection, Host Allowlists & Redirect Policy**: Custom upstreams passed via `x-retoken-upstream-url` strictly disallow loopback (`127.0.0.0/8`, `localhost`, `::1`), private RFC1918 subnets, IPv6 unique local (`fc00::/7`), link-local (`fe80::/10`), IPv4-mapped addresses (`::ffff:0:0/96`), and cloud metadata addresses (`169.254.169.254`). Hostnames resolving via DNS to private addresses are blocked. Automatic HTTP redirects are disabled on proxy upstream requests to prevent open-redirect SSRF escalation. Specific allowed hosts can be configured via `allowed_upstream_hosts` / `RETOKEN_ALLOWED_UPSTREAM_HOSTS`.
-- **Generation Cache Opt-In**: LLM generation endpoints (`/v1/messages`, `/v1/chat/completions`) require an explicit opt-in header (`x-retoken-cache: true` or `x-retoken-cache-exact: true`) to cache model responses, eliminating stale generation responses from omitted temperatures or implicit sampling parameters.
-- **Context & Credential Cache Isolation**: Cache keys incorporate the upstream base URL, request method, endpoint path, request payload, repository hash, and a SHA-256 fingerprint combining authorization credentials (`Authorization`, `x-api-key`, `api-key`) and provider-differentiating headers (`anthropic-version`, `anthropic-beta`, `openai-organization`, `openai-project`).
-- **Administrative Endpoints**: The running gateway daemon exposes loopback administrative routes `POST /_retoken/cache/clear` and `GET /_retoken/stats` used by `retoken cache clear` and `retoken stats`.
+- **Strict Configuration Loading**: Automatically loads `retoken.json`, `.retoken.json`, or `.retoken/config.json` with strict validation that fails loudly on malformed JSON, preventing misconfigured proxies from running silently with wrong defaults. Overlaid with environment variable overrides (`RETOKEN_*`).
+- **Airtight SSRF Protection, Host Allowlists & Redirect Policy**: Custom upstreams passed via `x-retoken-upstream-url` strictly disallow loopback (`127.0.0.0/8`, `localhost`, `::1`), private RFC1918 subnets, carrier-grade NAT (`100.64.0.0/10`), testing/benchmark subnets (`192.0.2.0/24`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`), multicast (`224.0.0.0/4`), reserved class E (`240.0.0.0/4`), IPv6 unique local (`fc00::/7`), link-local (`fe80::/10`), discard prefix (`100::/64`), and cloud metadata (`169.254.169.254`). Hostnames resolving via DNS to private addresses and internal domains (`.local`, `.internal`, `.home.arpa`, `.lan`) are blocked. Automatic HTTP redirects are disabled on proxy upstream requests. Pre-flight checks on outgoing URLs enforce destination safety right before dispatch.
+- **LLM Non-Determinism Modeling & Generation Cache Opt-In**: LLM generation endpoints (`/v1/messages`, `/v1/chat/completions`) model non-deterministic sampling: requests with omitted temperature (defaulting to 1.0), non-zero temperature without a fixed seed, or multiple completions (`n > 1`) strictly bypass the response cache unless `x-retoken-cache-stochastic: true` is explicitly passed.
+- **Context & Credential Cache Isolation**: Cache keys incorporate the upstream base URL, request method, endpoint path, request payload, repository hash, and a SHA-256 fingerprint combining authorization credentials (`Authorization`, `x-api-key`, `api-key`, `x-goog-api-key`) and response-affecting headers (`anthropic-version`, `anthropic-beta`, `openai-organization`, `openai-project`, `openai-version`, `accept`, `content-type`).
+- **Administrative Endpoints & Telemetry**: The running gateway daemon exposes loopback administrative routes `POST /_retoken/cache/clear`, `GET /_retoken/cache` (active entry listing), `DELETE /_retoken/cache?key=<k>` (single entry invalidation), and `GET /_retoken/stats` (live telemetry dashboard).
 - **Cache Opt-Out**: Requests with `Cache-Control: no-cache`, `no-store`, `Pragma: no-cache`, or `x-retoken-cache: false` bypass cache lookup and storage entirely.
 - **Request Size Limits & Timeouts**: Request body size is capped by `RETOKEN_MAX_REQUEST_BODY_BYTES` (default 10 MB, returning 413 on exceed). Network requests to upstream providers enforce a strict safety timeout (`upstream_timeout_secs`, default 60s).
 
@@ -112,10 +112,10 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 
 - **`gateway`**: The core `axum` HTTP proxy handling incoming requests, provider routing, URL normalization, cache lookups, admin endpoints, and response processing.
 - **`compressors`**: Heuristic parsers for log slicing, JSON array collapsing with MAD anomaly detection, base64 roundtripping, and content-addressed CCR storage.
-- **`core`**: Configuration (`AppConfig`), exact response caching (`ResponseCache`), in-memory session state tracking (`StateEngine`), and telemetry metrics (`FlightRecord`).
+- **`core`**: Strict configuration (`AppConfig`), exact response caching (`ResponseCache`), in-memory session state tracking (`StateEngine`), flight recorder (`FlightRecord`), and process-level telemetry accumulator (`FlightTelemetry`).
 - **`retrieval`**: Context budgeting (`ContextPackage`), dependency-aware ranking (`ContextPlanner`), and cache breakpoint formatting (`packer`).
 - **`scheduler`**: Tool call DAG scheduling (`ExecutionDag`), next-file prediction (`Prefetcher`), log virtualization (`slice_log`), and background task tracking (`TaskManager`). Containerized sandbox execution is a roadmap item.
-- **`analyzers`**: Heuristic symbol extraction and dependency graph scanner for Rust, Python, and TypeScript.
+- **`analyzers`**: Comment-aware symbol scanner and principled module/symbol dependency graph resolution (relative paths, stem matching, exported symbols).
 
 ## License
 

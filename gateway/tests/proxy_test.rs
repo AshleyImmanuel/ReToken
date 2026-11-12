@@ -219,6 +219,7 @@ async fn test_cache_hit_on_duplicate_request() {
 
     let req_body = serde_json::json!({
         "model": "claude-3-opus",
+        "temperature": 0.0,
         "messages": [
             {"role": "user", "content": "Cache test prompt"}
         ]
@@ -422,6 +423,7 @@ async fn test_cache_credential_isolation_and_no_cache_opt_out() {
 
     let req_body = serde_json::json!({
         "model": "claude-3-opus",
+        "temperature": 0.0,
         "messages": [
             {"role": "user", "content": "Credential isolation test"}
         ]
@@ -618,6 +620,7 @@ async fn test_admin_cache_clear_and_stats_endpoints() {
     // 2. Insert cached item via opted-in request
     let req_body = serde_json::json!({
         "model": "claude-3-opus",
+        "temperature": 0.0,
         "messages": [{"role": "user", "content": "Admin cache clear test"}]
     });
     let payload = serde_json::to_vec(&req_body).unwrap();
@@ -671,4 +674,104 @@ async fn test_admin_cache_clear_and_stats_endpoints() {
         .unwrap();
     let stats_json3: serde_json::Value = serde_json::from_slice(&bytes3).unwrap();
     assert_eq!(stats_json3["cached_entries"], 0);
+}
+
+#[tokio::test]
+async fn test_multiple_completions_bypass_cache() {
+    let (upstream_url, count) = start_mock_upstream().await;
+    let app = create_test_gateway(&upstream_url);
+
+    // Request with n=2 (multiple completions)
+    let req_body = serde_json::json!({
+        "model": "claude-3-opus",
+        "temperature": 0.0,
+        "n": 2,
+        "messages": [{"role": "user", "content": "Multiple completions prompt"}]
+    });
+    let payload = serde_json::to_vec(&req_body).unwrap();
+
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-retoken-cache", "true")
+        .body(Body::from(payload.clone()))
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), 200);
+    assert_eq!(resp1.headers().get("x-retoken-cache").unwrap(), "miss");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+
+    // 2nd request with n=2 must also bypass cache
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-retoken-cache", "true")
+        .body(Body::from(payload))
+        .unwrap();
+    let resp2 = app.oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), 200);
+    assert_eq!(resp2.headers().get("x-retoken-cache").unwrap(), "miss");
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_admin_cache_list_and_single_key_invalidation() {
+    let (upstream_url, _) = start_mock_upstream().await;
+    let app = create_test_gateway(&upstream_url);
+
+    // 1. Prime cache with 1 deterministic item
+    let req_body = serde_json::json!({
+        "model": "claude-3-opus",
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": "List and invalidate test"}]
+    });
+    let payload = serde_json::to_vec(&req_body).unwrap();
+    let req_prime = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-retoken-cache", "true")
+        .body(Body::from(payload))
+        .unwrap();
+    let resp_prime = app.clone().oneshot(req_prime).await.unwrap();
+    assert_eq!(resp_prime.status(), 200);
+
+    // 2. Query GET /_retoken/cache to list entries
+    let req_list = Request::builder()
+        .method("GET")
+        .uri("/_retoken/cache")
+        .body(Body::empty())
+        .unwrap();
+    let resp_list = app.clone().oneshot(req_list).await.unwrap();
+    assert_eq!(resp_list.status(), 200);
+    let bytes = axum::body::to_bytes(resp_list.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list_json["count"], 1);
+    let entry_key = list_json["entries"][0]["key"].as_str().unwrap().to_string();
+
+    // 3. Delete single key via DELETE /_retoken/cache?key=<entry_key>
+    let req_delete = Request::builder()
+        .method("DELETE")
+        .uri(format!("/_retoken/cache?key={}", entry_key))
+        .body(Body::empty())
+        .unwrap();
+    let resp_delete = app.clone().oneshot(req_delete).await.unwrap();
+    assert_eq!(resp_delete.status(), 200);
+
+    // 4. Verify cache is now empty
+    let req_list2 = Request::builder()
+        .method("GET")
+        .uri("/_retoken/cache")
+        .body(Body::empty())
+        .unwrap();
+    let resp_list2 = app.oneshot(req_list2).await.unwrap();
+    let bytes2 = axum::body::to_bytes(resp_list2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_json2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
+    assert_eq!(list_json2["count"], 0);
 }

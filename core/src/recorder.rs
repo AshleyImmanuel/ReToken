@@ -43,6 +43,42 @@ impl Default for FlightRecord {
     }
 }
 
+/// Aggregated runtime telemetry metrics across the gateway process lifetime.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct FlightTelemetry {
+    pub total_requests: u64,
+    pub total_errors: u64,
+    pub total_bytes_transferred: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_cache_hits: u64,
+    pub total_cache_misses: u64,
+}
+
+impl FlightTelemetry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(&mut self, record: &FlightRecord) {
+        self.total_requests += 1;
+        self.total_errors += record.errors as u64;
+        self.total_bytes_transferred += record.request_size as u64;
+        if let Some(tokens) = record.input_tokens {
+            self.total_input_tokens += tokens as u64;
+        }
+        if let Some(tokens) = record.output_tokens {
+            self.total_output_tokens += tokens as u64;
+        }
+        if let Some(tokens) = record.cached_tokens {
+            self.total_cached_tokens += tokens as u64;
+        }
+        self.total_cache_hits += record.cache_hits as u64;
+        self.total_cache_misses += record.cache_misses as u64;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

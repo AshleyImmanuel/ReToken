@@ -307,6 +307,7 @@ dependencies = [
  "analyzers",
  "anyhow",
  "clap",
+ "compressors",
  "gateway",
  "reqwest",
  "retoken_core",

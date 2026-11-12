@@ -78,7 +78,7 @@ impl ResponseCache {
         result.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
-    /// Compute a SHA256 fingerprint from credentials and response-affecting headers.
+    /// Compute a SHA256 fingerprint from credentials and all response-affecting headers.
     pub fn compute_context_fingerprint(headers: &[(String, String)]) -> Option<String> {
         use sha2::{Digest, Sha256};
         let mut relevant: Vec<(&str, &str)> = headers
@@ -89,10 +89,15 @@ impl ResponseCache {
                     "authorization"
                     | "x-api-key"
                     | "api-key"
+                    | "x-goog-api-key"
                     | "anthropic-version"
                     | "anthropic-beta"
                     | "openai-organization"
-                    | "openai-project" => Some((k.as_str(), v.as_str())),
+                    | "openai-project"
+                    | "openai-version"
+                    | "accept"
+                    | "content-type"
+                    | "x-retoken-provider-name" => Some((k.as_str(), v.as_str())),
                     _ => None,
                 }
             })
@@ -219,6 +224,33 @@ impl ResponseCache {
     pub fn max_entries(&self) -> usize {
         self.max_entries
     }
+
+    /// Returns a list of summaries for all entries currently in the cache.
+    pub fn list_entries(&self) -> Vec<CacheEntrySummary> {
+        let mut list: Vec<CacheEntrySummary> = self
+            .entries
+            .iter()
+            .map(|(k, v)| CacheEntrySummary {
+                key: k.clone(),
+                age_secs: v.created_at.elapsed().as_secs(),
+                hit_count: v.hit_count,
+                status: v.response_status,
+                size_bytes: v.response_bytes.len(),
+            })
+            .collect();
+        list.sort_by_key(|e| std::cmp::Reverse(e.hit_count));
+        list
+    }
+}
+
+/// Summary metadata for a cached response entry.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CacheEntrySummary {
+    pub key: String,
+    pub age_secs: u64,
+    pub hit_count: u64,
+    pub status: u16,
+    pub size_bytes: usize,
 }
 
 #[cfg(test)]

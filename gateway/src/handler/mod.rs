@@ -37,6 +37,7 @@ pub struct GatewayState {
     pub config: AppConfig,
     pub ccr_store: Arc<CcrStore>,
     pub start_time: std::time::Instant,
+    pub telemetry: Arc<Mutex<retoken_core::FlightTelemetry>>,
 }
 
 pub async fn handler(
@@ -136,6 +137,9 @@ pub async fn handler(
 
     let mut is_stream = false;
     let mut temperature: Option<f64> = None;
+    let mut multiple_completions = false;
+    let mut has_seed = false;
+
     if let Some(ref jb) = json_body {
         if let Some(model) = jb.get("model").and_then(|m| m.as_str()) {
             record.model = model.to_string();
@@ -145,6 +149,14 @@ pub async fn handler(
         }
         if let Some(stream_val) = jb.get("stream").and_then(|s| s.as_bool()) {
             is_stream = stream_val;
+        }
+        if let Some(n) = jb.get("n").and_then(|n| n.as_u64()) {
+            if n > 1 {
+                multiple_completions = true;
+            }
+        }
+        if jb.get("seed").is_some() {
+            has_seed = true;
         }
     }
 
@@ -194,12 +206,23 @@ pub async fn handler(
     });
     let generation_bypassed = is_generation && !allow_generation_cache;
 
-    // Non-zero temperature completions are non-deterministic; bypass cache unless client explicitly requests caching stochastic responses
-    let is_stochastic = temperature.is_some_and(|t| t > 0.0);
+    // A generation request is non-deterministic (stochastic) if:
+    // 1. temperature is omitted (LLMs default to stochastic sampling, e.g. 1.0) or > 0.0, AND seed is not provided.
+    // 2. n > 1 (multiple random completions).
+    let is_stochastic = if is_generation {
+        if multiple_completions {
+            true
+        } else {
+            !(has_seed || temperature == Some(0.0))
+        }
+    } else {
+        temperature.is_some_and(|t| t > 0.0)
+    };
+
     let allow_stochastic_cache = req_headers.iter().any(|(n, v)| {
         n.eq_ignore_ascii_case("x-retoken-cache-stochastic") && (v == "true" || v == "1")
     });
-    let stochastic_bypassed = is_stochastic && !allow_stochastic_cache;
+    let stochastic_bypassed = (is_stochastic && !allow_stochastic_cache) || multiple_completions;
     let no_cache = header_no_cache || generation_bypassed || stochastic_bypassed;
 
     let upstream_base = detected_provider.base_url(&state.config);
@@ -218,6 +241,8 @@ pub async fn handler(
         let mut cache = state.response_cache.lock().await;
 
         if let Some(cached) = cache.get(&cache_key) {
+            record.cache_hits = 1;
+            state.telemetry.lock().await.record(&record);
             return build_cache_hit_response(
                 cached.response_status,
                 &cached.response_headers,
@@ -236,9 +261,29 @@ pub async fn handler(
         .build()
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
+    // Pre-flight SSRF check on outgoing request URL destination
+    if !state.config.allow_private_upstreams {
+        if let Some(host) = reqwest_req.url().host_str() {
+            if crate::provider::is_private_or_loopback_host(host) {
+                warn!(
+                    "Outbound request destination '{}' blocked by SSRF policy",
+                    host
+                );
+                record.errors = 1;
+                state.telemetry.lock().await.record(&record);
+                return Err(axum::http::StatusCode::FORBIDDEN);
+            }
+        }
+    }
+
     let resp = state.client.execute(reqwest_req).await.map_err(|e| {
         warn!("Provider request failed: {}", e);
         record.errors = 1;
+        let tel = state.telemetry.clone();
+        let rec = record.clone();
+        tokio::spawn(async move {
+            tel.lock().await.record(&rec);
+        });
         axum::http::StatusCode::BAD_GATEWAY
     })?;
 
@@ -273,6 +318,7 @@ pub async fn handler(
         &final_bytes,
         repo_hash,
         auth_fingerprint.as_deref(),
+        &state.telemetry,
     )
     .await
 }

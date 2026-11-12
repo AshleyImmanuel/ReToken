@@ -28,10 +28,12 @@ pub async fn process_response(
     final_bytes: &[u8],
     repo_hash: Option<&str>,
     auth_fingerprint: Option<&str>,
+    telemetry: &Arc<Mutex<retoken_core::FlightTelemetry>>,
 ) -> Result<Response<Body>, axum::http::StatusCode> {
     // Native Streaming Bypass: preserve protocol, do not buffer, do not cache
     if is_stream {
         info!("Streaming response natively (bypassing cache & token extraction)");
+        telemetry.lock().await.record(record);
         let stream = resp.bytes_stream();
         let mut builder = Response::builder().status(status);
         if let Some(headers) = builder.headers_mut() {
@@ -68,6 +70,7 @@ pub async fn process_response(
     record.final_success = Some(status.is_success());
 
     info!("Flight Record: {:?}", record);
+    telemetry.lock().await.record(record);
 
     // Cache on Miss: Only cache non-streaming, successful 2xx responses when caching is not bypassed
     if cache_enabled && !no_cache && status.is_success() && !is_stream {
