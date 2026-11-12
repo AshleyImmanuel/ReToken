@@ -183,42 +183,6 @@ mod tests {
         assert!(body.get("tools").is_none());
         // Tool content should remain intact
         let msgs = body.get("messages").unwrap().as_array().unwrap();
-        let tool_msg = msgs.iter().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool")).unwrap();
-        assert_eq!(tool_msg["content"].as_str().unwrap(), raw_tool_content);
-    }
-
-    #[test]
-    fn pipeline_skips_ccr_when_recovery_unsupported() {
-        let store = test_store();
-        let big_array: Vec<Value> = (0..200)
-            .map(|i| json!({"file": format!("src/file_{}.rs", i), "size": 1024, "status": "ok"}))
-            .collect();
-
-        let raw_tool_content = serde_json::to_string(&big_array).unwrap();
-        let mut body = json!({
-            "model": "gpt-4o",
-            "messages": [
-                {"role": "user", "content": "list files"},
-                {"role": "tool", "content": raw_tool_content.clone()}
-            ]
-        });
-
-        // Provider is OpenAI (is_anthropic: false, recovery_supported: false)
-        let stats = run_pipeline_for_provider(
-            &mut body,
-            &store,
-            false,
-            "test persona",
-            "test elision",
-            false,
-            false,
-        );
-
-        assert_eq!(stats.ccr_entries_stored, 0);
-        // Tools array must NOT have been created or injected with fake retrieval tool
-        assert!(body.get("tools").is_none());
-        // Tool content should remain intact
-        let msgs = body.get("messages").unwrap().as_array().unwrap();
         let tool_msg = msgs
             .iter()
             .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))

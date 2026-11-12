@@ -1,49 +1,57 @@
 # ReToken Architecture
 
-ReToken is a highly-optimized local proxy sitting between IDEs (like Cursor, Windsurf) and LLM providers. Its primary goal is to **cut API costs** and **reduce latency** through aggressive token compression, intelligent caching, and payload optimization.
+ReToken is a local proxy sitting between agentic IDEs (Cursor, Windsurf, RooCode) and LLM providers. Its primary goal is to **cut API costs** and **reduce latency** through structural payload compression, exact-hash caching, and prompt cache optimization.
 
 ## System Components
 
-The workspace is divided into several highly-specialized Rust crates:
+The workspace is divided into specialized Rust crates:
 
-### 1. `proxy` / `gateway`
-The core HTTP interceptor. It listens on `http://127.0.0.1:8888` (configurable) and parses incoming API requests.
-- **Provider Detection**: Automatically routes requests to OpenAI, Anthropic, or generic endpoints based on the path.
-- **Optimization Pipeline (`optimizer.rs`)**: Applies all payload modifications before sending them over the network.
-- **Bypass Mode**: Natively handles streaming and zero-copy bypass for requests marked with `X-ReToken-Bypass`.
+### 1. `gateway` & `proxy`
+The core HTTP interceptor listening on `127.0.0.1:8888` (configurable):
+- **Provider Detection & URL Normalization**: Routes requests to OpenAI, Anthropic, or generic upstream endpoints based on paths (`/v1/messages`, `/v1/chat/completions`) and headers, normalizing `/v1` path prefixes.
+- **Upstream Validation**: Enforces valid `http`/`https` schemes with non-empty hosts on custom upstream URLs, preventing unsafe forwarding.
+- **Optimization Pipeline (`optimizer.rs`)**: Applies provider-aware persona injection, CCR elision (for supported non-streaming Anthropic flows), and prompt caching breakpoints.
+- **Bypass Mode & Streaming**: Preserves upstream response headers (`content-type`, rate limits) and passes streaming chunked responses (`stream: true`) through natively without buffering or caching.
 
 ### 2. `core`
-Handles the fundamental state and configuration of ReToken.
-- **State Engine**: A multi-tenant, concurrent map that tracks ongoing and historical requests.
-- **Semantic Cache**: An in-memory cache that evaluates request hashes (including context modifications) to instantly serve duplicate requests.
-- **Telemetry (`FlightRecord`)**: Records detailed observability metrics for every request (tokens saved, compression ratios, cache hits).
+Handles configuration, caching, and state tracking:
+- **Exact Request Cache (`ResponseCache`)**: In-memory cache keyed by SHA256 of HTTP method, endpoint path, provider name, request payload, and repo hash. Enforces TTL expiry and FIFO/LRU eviction.
+- **State Engine (`StateEngine`)**: In-memory session tracking for objects and hashes (roadmap: persistent multi-tenant backend).
+- **Telemetry (`FlightRecord`)**: Records detailed observability metrics for every request (token counts, compression ratios, cache hits/misses, duration).
 
-### 3. `retrieval`
-Responsible for manipulating the structural JSON of LLM requests.
-- **Packer**: Reorders message sequences to maximize Anthropic's native `cache_control` blocks.
-- **Terse Injection**: Inserts high-priority system instructions compelling the LLM to output only raw code, drastically reducing generation time and output tokens.
-- **Planner**: Ranks active files based on relevance and ensures the context package stays strictly within the user-defined token budget.
+### 3. `compressors`
+Dedicated heuristic parsers for request payloads:
+- **Content-Addressed CCR Store (`CcrStore`)**: Stores original content under SHA-256 handles before eliding data, with transparent retrieval during Anthropic response interception.
+- **Log Slicing**: Truncates massive log outputs while preserving error lines and head/tail context.
+- **JSON Compaction**: Collapses large uniform arrays with MAD anomaly preservation.
+- **Code Minification & Delta Encoding**: Minifies comments and generates unified diffs for previously seen files.
 
-### 4. `compressors`
-Dedicated parsers for stripping unnecessary data from requests.
-- **Schema Compression**: Strips bloated human-readable `description` and `examples` fields from tool/function schemas.
-- **JSON Compaction**: Removes nulls and redundant spacing.
-- **Log Deduplication**: Truncates and slices massive error logs into manageable chunks before they reach the LLM context window.
+### 4. `retrieval`
+Context budgeting, prioritization, and message formatting:
+- **Context Package (`ContextPackage`)**: Manages token budgets and tracks included object IDs.
+- **Context Planner (`ContextPlanner`)**: Ranks files using the dependency graph and active workspace files to prioritize relevant context within the token budget.
+- **Packer (`packer.rs`)**: Reorganizes misplaced system messages into top-level parameters and injects Anthropic content block `cache_control` breakpoints without disturbing message sequence.
 
 ### 5. `scheduler` & `analyzers`
-*(Future Phase Features)*
-- **Scheduler**: A DAG-based dependency resolver for queuing asynchronous task executions (e.g., fetching web content, running lints).
-- **Analyzers**: AST-style scanners that rapidly walk the local repository to construct a Dependency Graph of symbols, functions, and imports.
+Modular scheduling and code intelligence:
+- **Execution DAG (`ExecutionDag`)**: Generates topological execution batches, grouping independent read-only tool calls into parallel batches while enforcing sequential execution for mutating operations.
+- **Prefetcher (`Prefetcher`)**: Predicts likely next files based on imports, reverse dependencies, and test patterns.
+- **Virtualization (`slice_log`)**: Slices excessive command output into head and tail slices.
+- **Task Manager (`TaskManager`)**: Tracks background task status and execution (roadmap: containerized virtualization).
+- **Analyzers**: AST symbol extractor and file walker to construct the repository dependency graph.
 
 ## Data Flow (Hot Path)
 
-1. **Request Intercepted**: IDE sends a POST to `http://127.0.0.1:8888/v1/messages`.
-2. **Detection**: `gateway` identifies the target provider.
-3. **Cache Lookup**: `core::cache` checks if an exact request hash has been seen. If YES -> return cached response (0ms latency, 0 tokens billed).
-4. **Optimization**: 
-   - Apply Terse mode instructions.
-   - Compress tool schemas.
-   - Reorder Anthropic messages for `cache_control`.
-5. **Execution**: The modified payload is forwarded to the upstream provider via `reqwest`.
-6. **Telemetry**: Token usage is extracted from the response headers/body, and the `FlightRecord` is logged to tracking.
-7. **Cache Update**: The response is saved in the local cache for future lookups.
+1. **Request Intercepted**: IDE or CLI agent sends an HTTP request to `http://127.0.0.1:8888`.
+2. **Provider Detection & Validation**: `gateway::provider` identifies the provider, validates custom upstreams, and normalizes target URLs.
+3. **Cache Lookup**: If non-streaming and caching is enabled, `ResponseCache` evaluates the context-aware cache key. If hit -> returns cached response directly.
+4. **Optimization Pipeline**:
+   - Applies provider-safe persona prompt.
+   - For Anthropic non-streaming, stores large payload blocks in CCR and elides them with markers.
+   - Injects Anthropic prompt cache breakpoints.
+5. **Upstream Forwarding**: Forwards the payload to the provider using `reqwest`, stripping `Host`, `Content-Length`, and hop-by-hop headers.
+6. **Response Processing**:
+   - Streaming responses pass through immediately.
+   - Non-streaming Anthropic responses: intercepts `retoken_retrieve` tool calls, resolves original data from CCR, and updates `stop_reason` to `end_turn`.
+   - Successful non-streaming responses are stored in `ResponseCache`.
+7. **Telemetry**: Logs token usage, savings, and performance to `FlightRecord`.

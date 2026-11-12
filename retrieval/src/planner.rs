@@ -63,7 +63,7 @@ impl ContextPlanner {
                 500 // fallback if file missing
             };
 
-            let file_id = path.to_string_lossy().into_owned(); // Normally we'd use the SHA hash object_id
+            let file_id = path.to_string_lossy().into_owned();
 
             if !package.add(file_id, token_estimate) {
                 break; // Budget full
@@ -71,5 +71,60 @@ impl ContextPlanner {
         }
 
         package
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use analyzers::graph::FileNode;
+
+    #[test]
+    fn test_context_planner_prioritization() {
+        let mut graph = DependencyGraph::new();
+        let path_main = PathBuf::from("src/main.rs");
+        let path_dep = PathBuf::from("src/dep.rs");
+        let path_unrelated = PathBuf::from("src/unrelated.rs");
+
+        graph.files.insert(
+            path_main.clone(),
+            FileNode {
+                path: path_main.clone(),
+                functions: vec!["main".into()],
+                classes: vec![],
+                imports: vec!["dep_func".into()],
+                exports: vec![],
+            },
+        );
+
+        graph.files.insert(
+            path_dep.clone(),
+            FileNode {
+                path: path_dep.clone(),
+                functions: vec!["dep_func".into()],
+                classes: vec![],
+                imports: vec![],
+                exports: vec!["dep_func".into()],
+            },
+        );
+
+        graph.files.insert(
+            path_unrelated.clone(),
+            FileNode {
+                path: path_unrelated.clone(),
+                functions: vec!["other".into()],
+                classes: vec![],
+                imports: vec![],
+                exports: vec![],
+            },
+        );
+
+        let planner = ContextPlanner::new(2000);
+        let pkg = planner.plan(&graph, &[path_main.clone()]);
+
+        // Main file has highest priority (+50), dep has imported priority (+20), unrelated has 0
+        assert!(pkg.object_ids.contains("src/main.rs"));
+        assert!(pkg.object_ids.contains("src/dep.rs"));
+        assert!(!pkg.object_ids.contains("src/unrelated.rs"));
     }
 }

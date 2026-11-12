@@ -62,7 +62,7 @@ impl Task {
 
                 let raw_output = format!("{}\n{}", stdout, stderr).trim().to_string();
 
-                // VIRTUALIZE LOGS: slice to max 1000 lines (500 head, 500 tail) to save tokens
+                // Virtualize logs: slice to max 1000 lines (500 head, 500 tail)
                 self.output = slice_log(&raw_output, 1000, 500, 500);
 
                 if output.status.success() {
@@ -79,5 +79,22 @@ impl Task {
                 Err(e.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_task_execute_invalid_command() {
+        let mut task = Task::new(
+            "t1".into(),
+            "this_command_definitely_does_not_exist_xyz123".into(),
+            SandboxMode::Native,
+        );
+        let res = task.execute().await;
+        assert!(res.is_err());
+        assert_eq!(task.status, TaskStatus::Failed);
     }
 }

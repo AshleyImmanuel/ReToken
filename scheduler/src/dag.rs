@@ -52,7 +52,7 @@ impl ExecutionDag {
         let mut batches: Vec<Vec<String>> = Vec::new();
 
         while !queue.is_empty() {
-            // All nodes in the current queue have no unmet dependencies — they can run in parallel
+            // All nodes in the current queue have no unmet dependencies
             let mut next_queue: VecDeque<String> = VecDeque::new();
 
             // Separate read-only (parallelizable) from mutating (must be sequential)
@@ -106,5 +106,46 @@ impl ExecutionDag {
         }
 
         batches
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_execution_dag_parallel_and_sequential_batches() {
+        let mut dag = ExecutionDag::new();
+
+        // Two independent read-only tasks
+        dag.add_node(DagNode {
+            id: "read_1".into(),
+            command: "cat file1".into(),
+            is_read_only: true,
+            dependencies: vec![],
+        });
+        dag.add_node(DagNode {
+            id: "read_2".into(),
+            command: "cat file2".into(),
+            is_read_only: true,
+            dependencies: vec![],
+        });
+
+        // A mutating task dependent on both reads
+        dag.add_node(DagNode {
+            id: "write_1".into(),
+            command: "echo test > file3".into(),
+            is_read_only: false,
+            dependencies: vec!["read_1".into(), "read_2".into()],
+        });
+
+        let schedule = dag.schedule();
+        assert_eq!(schedule.len(), 2);
+        // Batch 1 has both read tasks in parallel
+        assert_eq!(schedule[0].len(), 2);
+        assert!(schedule[0].contains(&"read_1".to_string()));
+        assert!(schedule[0].contains(&"read_2".to_string()));
+        // Batch 2 has the mutating write task
+        assert_eq!(schedule[1], vec!["write_1".to_string()]);
     }
 }

@@ -18,10 +18,16 @@
   * **Multi-Context Cache Keys**: Expanded cache keys to encompass HTTP method, request path, provider name, request payload bytes, and repo hash, preventing cross-endpoint/cross-provider collisions.
   * **Streaming Isolation**: Completely bypassed cache lookups and insertions for streaming requests (`stream: true`).
   * **Cache Eviction Fixes**: Fixed `ResponseCache::insert` to update existing keys in place without corrupting insertion order or leaking order entries, and added zero-capacity guards.
+* **Subsystem Public APIs, Cleanups & Testing**:
+  * **Removed Duplicate Definitions**: Fixed duplicate test definition `pipeline_skips_ccr_when_recovery_unsupported` in `compressors/src/pipeline.rs`, duplicate `mod tests` in `core/src/cache.rs`, and duplicated functions in `gateway/src/provider.rs`.
+  * **Retrieval & Scheduler Public Exports**: Replaced placeholder stub `init()` functions in `retrieval/src/lib.rs` and `scheduler/src/lib.rs` with clean module re-exports (`ContextPackage`, `ContextPlanner`, `ExecutionDag`, `Prefetcher`, `TaskManager`, `slice_log`).
+  * **Context Package Idempotency**: Fixed `ContextPackage::add` in `retrieval/src/package.rs` to check set membership before budget validation, preventing redundant token accrual and false budget rejections on duplicate object additions.
+  * **Scheduler & Retrieval Test Coverage**: Added targeted unit test suites across `scheduler` (`dag.rs`, `prefetch.rs`, `task.rs`, `virtualization.rs`) and `retrieval` (`planner.rs`, `package.rs`), expanding workspace tests to 58 passing tests.
+  * **Documentation & Architecture Grounding**: Updated `README.md` and `ARCHITECTURE.md` to accurately reflect the implemented codebase (exact request caching, in-memory session engine, native streaming passthrough, and transparent Anthropic CCR recovery).
 * **Integration Testing & Verification**:
   * Added 6 end-to-end integration tests in `gateway/tests/proxy_test.rs` utilizing local mock upstream servers on ephemeral ports (no live credentials or external networks required).
-  * Added unit test suites across `core`, `compressors`, `retrieval`, and `gateway`, expanding workspace test coverage from 23 to 51 passing tests.
-  * Resolved formatting issues and trailing whitespace in `delta.rs`, passing `cargo fmt --check`, `cargo test --workspace`, and `cargo build --workspace`.
+  * Expanded workspace test coverage from 23 to 58 passing tests with 0 failures across all crates.
+  * Verified code quality with `cargo fmt --check`, `cargo test --workspace`, and `cargo build --workspace`.
 
 ### Antigravity (2026-09-29)
 * **Optimization & Modularization**: 

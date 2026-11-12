@@ -1,11 +1,6 @@
 use std::collections::HashSet;
 
 /// Predicts likely next files the agent will request based on the dependency graph.
-///
-/// Strategy (PRD Section 22):
-///   When the model reads file A, use the dependency graph to predict
-///   that it will need A's imports and A's test file next.
-///   Pre-load these into cache while the model is still thinking.
 pub struct Prefetcher {
     /// Maximum depth to traverse the dependency graph.
     pub max_depth: usize,
@@ -22,10 +17,6 @@ impl Prefetcher {
     }
 
     /// Given a file that was just accessed, predict which files will be needed next.
-    /// Uses a simple heuristic:
-    ///   1. Direct imports of the accessed file
-    ///   2. Test files matching the accessed file's name
-    ///   3. Files that import the accessed file (reverse dependencies)
     pub fn predict_next_files(
         &self,
         accessed_file: &str,
@@ -70,7 +61,6 @@ impl Prefetcher {
 }
 
 /// Generate possible test file path patterns from a source file.
-/// e.g., "src/auth/login.ts" -> ["login.test", "login_test", "test_login"]
 fn generate_test_paths(file_path: &str) -> Vec<String> {
     let stem = std::path::Path::new(file_path)
         .file_stem()
@@ -87,4 +77,30 @@ fn generate_test_paths(file_path: &str) -> Vec<String> {
         format!("test_{}", stem),
         format!("{}.spec", stem),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prefetcher_predicts_imports_and_tests() {
+        let prefetcher = Prefetcher::new(1, 5);
+        let imports = vec![
+            (
+                "src/auth.ts".to_string(),
+                vec!["src/utils.ts".to_string(), "src/types.ts".to_string()],
+            ),
+            ("src/auth.test.ts".to_string(), vec![]),
+            ("src/app.ts".to_string(), vec!["src/auth.ts".to_string()]),
+        ];
+
+        let predicted = prefetcher.predict_next_files("src/auth.ts", &imports);
+
+        // Should include direct imports, test file, and reverse dependency (app.ts)
+        assert!(predicted.contains(&"src/utils.ts".to_string()));
+        assert!(predicted.contains(&"src/types.ts".to_string()));
+        assert!(predicted.contains(&"src/auth.test.ts".to_string()));
+        assert!(predicted.contains(&"src/app.ts".to_string()));
+    }
 }
