@@ -17,7 +17,6 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "regex",
- "retoken_core",
  "similar",
  "tempfile",
 ]
