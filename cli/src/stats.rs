@@ -23,6 +23,10 @@ pub async fn run_stats() -> anyhow::Result<()> {
     );
     println!("  CCR Enabled: {}", config.ccr_enabled);
     println!(
+        "  Prompt Caching: {} (literal pass-through default)",
+        config.prompt_caching_enabled
+    );
+    println!(
         "  Max Request Body Size: {} MB",
         config.max_request_body_bytes / (1024 * 1024)
     );

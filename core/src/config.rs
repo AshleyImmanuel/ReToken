@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub compression_enabled: bool,
     /// Whether Contextual Compression and Retrieval (CCR) handle elision is enabled (default: false).
     pub ccr_enabled: bool,
+    /// Whether Anthropic prompt caching breakpoints and message reordering are injected (default: false for literal pass-through).
+    pub prompt_caching_enabled: bool,
     pub port: u16,
 
     /// Maximum request body size in bytes before returning 413 Payload Too Large (default: 10MB).
@@ -77,6 +79,8 @@ impl Default for AppConfig {
             terse_mode: parse_env_var("RETOKEN_TERSE_MODE").unwrap_or(false),
             compression_enabled: parse_env_var("RETOKEN_COMPRESSION_ENABLED").unwrap_or(false),
             ccr_enabled: parse_env_var("RETOKEN_CCR_ENABLED").unwrap_or(false),
+            prompt_caching_enabled: parse_env_var("RETOKEN_PROMPT_CACHING_ENABLED")
+                .unwrap_or(false),
             port: parse_env_var("RETOKEN_PORT").unwrap_or(8888),
             max_request_body_bytes: parse_env_var("RETOKEN_MAX_REQUEST_BODY_BYTES")
                 .unwrap_or(10 * 1024 * 1024),
@@ -154,6 +158,9 @@ impl AppConfig {
         if let Some(v) = parse_env_var("RETOKEN_CCR_ENABLED") {
             self.ccr_enabled = v;
         }
+        if let Some(v) = parse_env_var("RETOKEN_PROMPT_CACHING_ENABLED") {
+            self.prompt_caching_enabled = v;
+        }
         if let Some(v) = parse_env_var("RETOKEN_PORT") {
             self.port = v;
         }
@@ -215,6 +222,10 @@ mod tests {
             !config.ccr_enabled,
             "ccr_enabled must be false by default to avoid broken retrieval loops"
         );
+        assert!(
+            !config.prompt_caching_enabled,
+            "prompt_caching_enabled must be false by default for literal pass-through"
+        );
         assert_eq!(config.max_cache_bytes, 256 * 1024 * 1024);
         assert!(
             !config.terse_mode,
@@ -227,6 +238,10 @@ mod tests {
         assert!(
             !config.ccr_enabled,
             "ccr_enabled must be false by default to avoid broken retrieval loops"
+        );
+        assert!(
+            !config.prompt_caching_enabled,
+            "prompt_caching_enabled must be false by default for literal pass-through"
         );
         assert_eq!(config.upstream_timeout_secs, 60);
         assert!(config.allowed_upstream_hosts.is_empty());

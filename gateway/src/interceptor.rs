@@ -1,6 +1,90 @@
 use compressors::ccr::CcrStore;
 use tracing::{info, warn};
 
+/// Represents a detected CCR retrieval tool invocation from the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CcrInvocation {
+    pub tool_use_id: String,
+    pub handle: String,
+}
+
+/// Detects if an Anthropic response contains any `retoken_retrieve` tool calls.
+pub fn find_ccr_tool_calls(resp_json: &serde_json::Value) -> Vec<CcrInvocation> {
+    let mut calls = Vec::new();
+    if let Some(content) = resp_json.get("content").and_then(|c| c.as_array()) {
+        for block in content {
+            if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                && block.get("name").and_then(|n| n.as_str()) == Some("retoken_retrieve")
+            {
+                let id = block
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let handle = block
+                    .get("input")
+                    .and_then(|i| i.get("handle"))
+                    .and_then(|h| h.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if !handle.is_empty() {
+                    calls.push(CcrInvocation {
+                        tool_use_id: id,
+                        handle,
+                    });
+                }
+            }
+        }
+    }
+    calls
+}
+
+/// Builds the follow-up tool_result turn for Anthropic to allow the model to reason
+/// over the recovered data in a true multi-turn recovery loop.
+pub fn build_ccr_tool_result_messages(
+    assistant_content: &serde_json::Value,
+    calls: &[CcrInvocation],
+    ccr_store: &CcrStore,
+) -> (serde_json::Value, serde_json::Value) {
+    let assistant_msg = serde_json::json!({
+        "role": "assistant",
+        "content": assistant_content
+    });
+
+    let tool_results: Vec<serde_json::Value> = calls
+        .iter()
+        .map(|call| match ccr_store.retrieve(&call.handle) {
+            Ok(Some(data)) => {
+                let content_str = String::from_utf8_lossy(&data).to_string();
+                serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": call.tool_use_id,
+                    "content": content_str
+                })
+            }
+            Ok(None) => serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": call.tool_use_id,
+                "is_error": true,
+                "content": format!("CCR handle not found: {}", call.handle)
+            }),
+            Err(e) => serde_json::json!({
+                "type": "tool_result",
+                "tool_use_id": call.tool_use_id,
+                "is_error": true,
+                "content": format!("CCR retrieval error: {}", e)
+            }),
+        })
+        .collect();
+
+    let user_tool_result_msg = serde_json::json!({
+        "role": "user",
+        "content": tool_results
+    });
+
+    (assistant_msg, user_tool_result_msg)
+}
+
 /// Intercepts `retoken_retrieve` tool calls in Anthropic's response and resolves
 /// them from the CCR store.
 ///
@@ -182,5 +266,46 @@ mod tests {
 
         // Unsupported OpenAI format is left unchanged
         assert_eq!(intercepted, resp_bytes);
+    }
+
+    #[test]
+    fn test_find_ccr_tool_calls_and_build_multi_turn() {
+        let store = CcrStore::open_in_memory().unwrap();
+        let handle = store.store(b"recovered secret logs", "test").unwrap();
+
+        let response = json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Retrieving data"
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01",
+                    "name": "retoken_retrieve",
+                    "input": { "handle": handle }
+                }
+            ],
+            "stop_reason": "tool_use"
+        });
+
+        let calls = find_ccr_tool_calls(&response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool_use_id, "toolu_01");
+        assert_eq!(calls[0].handle, handle);
+
+        let (assistant_msg, tool_result_msg) =
+            build_ccr_tool_result_messages(&response["content"], &calls, &store);
+
+        assert_eq!(assistant_msg["role"], "assistant");
+        assert_eq!(tool_result_msg["role"], "user");
+        let results = tool_result_msg["content"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["type"], "tool_result");
+        assert_eq!(results[0]["tool_use_id"], "toolu_01");
+        assert_eq!(results[0]["content"], "recovered secret logs");
     }
 }

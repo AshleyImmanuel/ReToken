@@ -24,7 +24,7 @@ use crate::bypass::forward_raw;
 use crate::optimizer;
 use crate::provider::{
     build_target_url, detect_provider, is_hop_by_hop_header, is_internal_header,
-    is_sensitive_header,
+    is_sensitive_header, Provider,
 };
 
 use self::cache::build_cache_hit_response;
@@ -160,17 +160,25 @@ pub async fn handler(
         }
     }
 
-    // Apply Optimizations
-    let final_bytes = if let Some(ref mut body_json) = json_body {
-        optimizer::optimize_payload(
-            body_json,
-            original_size,
-            &detected_provider,
-            &state.config,
-            &mut record,
-            &state.ccr_store,
-            is_stream,
-        )
+    // Apply Optimizations: when all optimizations are disabled, preserve raw client bytes bit-for-bit
+    let optimizations_active = state.config.compression_enabled
+        || state.config.terse_mode
+        || (detected_provider == Provider::Anthropic && state.config.prompt_caching_enabled);
+
+    let final_bytes = if optimizations_active {
+        if let Some(ref mut body_json) = json_body {
+            optimizer::optimize_payload(
+                body_json,
+                original_size,
+                &detected_provider,
+                &state.config,
+                &mut record,
+                &state.ccr_store,
+                is_stream,
+            )
+        } else {
+            bytes.to_vec()
+        }
     } else {
         bytes.to_vec()
     };

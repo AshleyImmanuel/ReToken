@@ -10,7 +10,7 @@
 
 ## Core Features (MVP)
 
-- **Lossless Default with Quality Preservation**: User prompts, system instructions, assistant reasoning history, and code comments (`//`) are strictly preserved bit-for-bit. Lossy compression (`compression_enabled`) and terse mode (`terse_mode`) are disabled by default.
+- **Literal Pass-Through Default with Quality Preservation**: User prompts, system instructions, assistant reasoning history, tool definitions, and code comments are strictly preserved bit-for-bit. Request compression (`compression_enabled`), terse mode (`terse_mode`), Anthropic prompt cache injection (`prompt_caching_enabled`), and CCR (`ccr_enabled`) are all disabled by default, ensuring incoming requests and provider responses pass through untouched unless explicitly opted in.
 - **Exact-Hash Response Caching**: Hashes full request context (HTTP method, endpoint path, provider name, upstream URL, request payload, repo hash, and non-transport headers) to serve duplicate requests instantly with configurable TTL and LRU eviction.
 - **Dual Limit Cache Memory Protection**: Cache is constrained by both entry count (`max_cache_entries`, default 1024) and total memory budget (`max_cache_bytes`, default 256MB), preventing memory exhaustion.
 - **Connect-Time SSRF Validation & IP Pinning**: Enforces strict destination safety for custom upstreams, blocking loopback, private subnets, carrier-grade NAT, benchmark subnets, and cloud metadata. Pins verified socket destinations at connection time to eliminate TOCTOU DNS rebinding risks.

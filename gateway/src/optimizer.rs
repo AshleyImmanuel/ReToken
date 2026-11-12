@@ -56,8 +56,8 @@ pub fn optimize_payload(
         compressors::inject::inject_output_persona_for_provider(json_body, persona, is_anthropic);
     }
 
-    // Phase 2: Provider-specific cache optimization (Anthropic prompt caching)
-    if is_anthropic {
+    // Phase 2: Provider-specific cache optimization (Anthropic prompt caching, opt-in)
+    if is_anthropic && config.prompt_caching_enabled {
         packer::reorder_for_cache(json_body);
         packer::inject_cache_breakpoint(json_body);
     }

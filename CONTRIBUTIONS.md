@@ -4,11 +4,11 @@
 
 ### Antigravity (2026-11-12 - Quality & Operational Safeguards)
 * **Model Reasoning & Prompt Context Protection**:
-  * **Lossless Pass-Through by Default**: Added `compression_enabled` (default `false`) and `ccr_enabled` (default `false`) to `AppConfig`, ensuring that requests are passed through completely losslessly by default.
+  * **Literal Pass-Through by Default**: Added `prompt_caching_enabled` (default `false`), `compression_enabled` (default `false`), and `ccr_enabled` (default `false`) to `AppConfig`. When all optimization flags are disabled, incoming requests are passed through 100% bit-for-bit without JSON re-serialization, message reordering, or prompt cache breakpoint injection.
   * **Strict Role Boundaries**: Updated `compressors/src/process.rs` so that lossy compression is strictly restricted to tool outputs (`role == "tool"` or `type == "tool_result"`). User prompts, system messages, and assistant reasoning history are never elided or truncated.
   * **Code Comment Preservation**: Removed comment stripping in `compressors/src/minify.rs`. Developer comments explaining code behavior, assumptions, and security constraints (`//`) are now 100% preserved.
   * **Opt-In Terse Mode**: Changed `terse_mode` default from `true` to `false` in `AppConfig`, eliminating unwanted prompt persona injection that pushed the model toward extreme brevity.
-  * **Safe CCR Guardrails & Zero-Touch Passthrough**: Disabled CCR elision and fictitious retrieval tool injection by default (`ccr_enabled: false`). Response-side CCR interception in `gateway/src/handler/response.rs` now checks `ccr_enabled`, ensuring provider responses are never parsed or modified when disabled.
+  * **Safe CCR Architecture & Zero-Touch Passthrough**: Disabled CCR elision and fictitious retrieval tool injection by default (`ccr_enabled: false`). Implemented `find_ccr_tool_calls` and `build_ccr_tool_result_messages` in `gateway/src/interceptor.rs` to support protocol-compliant multi-turn tool resolution rather than fabricating model output turns. Response-side CCR interception in `gateway/src/handler/response.rs` checks `ccr_enabled`, ensuring provider responses are never parsed or modified when disabled.
 * **Hard Total Cache Memory Limit**:
   * Added `max_cache_bytes` to `AppConfig` (default 256 MB) and implemented byte-budget tracking (`current_bytes`) in `ResponseCache`.
   * The cache now enforces both max entry count AND hard total memory budget, automatically evicting oldest entries when either threshold is exceeded.

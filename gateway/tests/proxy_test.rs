@@ -1015,4 +1015,77 @@ fn process_payment(user: &User) {
     // Terse persona must NOT be injected by default
     assert!(!forwarded_str.contains("ReToken Terse Mode"));
     assert!(!forwarded_str.contains("Caveman"));
+    // Literal pass-through: prompt caching breakpoint must NOT be injected by default
+    assert!(!forwarded_str.contains("cache_control"));
+    // Forwarded bytes must match the exact original request bytes bit-for-bit
+    let original_bytes = serde_json::to_vec(&payload).unwrap();
+    assert_eq!(forwarded_bytes, original_bytes);
+}
+
+#[tokio::test]
+async fn test_opt_in_prompt_caching_injects_breakpoints() {
+    let captured_body = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let cap_clone = captured_body.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let cap = cap_clone.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *cap.lock().await = bytes.to_vec();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"m2","content":[{"type":"text","text":"ok"}]}"#,
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.prompt_caching_enabled = true; // Opt-in to prompt caching
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let payload = serde_json::json!({
+        "model": "claude-3-opus",
+        "system": "You are a helpful coding assistant.",
+        "messages": [
+            {"role": "user", "content": "Explain rust ownership."}
+        ]
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let forwarded_bytes = captured_body.lock().await.clone();
+    let forwarded_str = String::from_utf8_lossy(&forwarded_bytes);
+
+    // Prompt cache breakpoint MUST be injected when opted in
+    assert!(forwarded_str.contains("cache_control"));
+    assert!(forwarded_str.contains("ephemeral"));
 }
