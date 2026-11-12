@@ -310,6 +310,7 @@ dependencies = [
  "gateway",
  "reqwest",
  "retoken_core",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

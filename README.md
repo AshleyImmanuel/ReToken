@@ -87,9 +87,9 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 | `retoken run` | Implemented | Starts the local HTTP intercepting proxy daemon on `127.0.0.1:8888`. |
 | `retoken wrap <cmd>` | Implemented | Wraps CLI agents (e.g. `claude`, `aider`), injecting proxy endpoints with process readiness checks. |
 | `retoken doctor` | Implemented | Diagnoses local gateway status, port binding, and upstream provider reachability. |
-| `retoken stats` | Implemented | Displays telemetry settings, runtime parameters, and flight recorder configuration. |
-| `retoken cache [action]` | Implemented | Inspects cache capacity/status or clears local cache state. |
-| `retoken analyze [path]` | Implemented | Multi-language syntax analyzer scanning symbols and dependency graphs (Rust, Python, TS/JS). |
+| `retoken stats` | Implemented | Displays telemetry settings, runtime parameters, and live gateway telemetry. |
+| `retoken cache [action]` | Implemented | Inspects cache capacity/status or purges live daemon cache entries via administrative endpoint. |
+| `retoken analyze [path]` | Implemented | Multi-language heuristic syntax analyzer scanning symbols and dependency graphs (Rust, Python, TS/JS). |
 | `retoken init` | Implemented | Injects ReToken agent guidance skills into `.claudecode` and `.gemini`. |
 | `retoken trace` | Roadmap | Per-request payload inspection and CCR handle resolution tracking. |
 | `retoken benchmark` | Roadmap | End-to-end compression ratio and latency benchmarking against standardized workloads. |
@@ -98,10 +98,11 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 
 ## Security & Operational Controls
 
-- **Configuration File & Environment Overrides**: Automatically loads `retoken.json` or `.retoken.json` from the repository root, with seamless environment variable overrides (`RETOKEN_*`).
-- **SSRF Protection & Host Allowlists**: Custom upstreams passed via `x-retoken-upstream-url` strictly disallow loopback (`127.0.0.0/8`, `localhost`), private RFC1918 subnets, and cloud metadata addresses (`169.254.169.254`). Specific allowed hosts can be configured via `allowed_upstream_hosts` / `RETOKEN_ALLOWED_UPSTREAM_HOSTS`.
-- **Credential-Isolated Caching**: Response cache keys include a SHA-256 fingerprint of the request's credentials (`Authorization` or `x-api-key`), preventing cross-tenant cache pollution.
-- **Stochastic Completion Safety**: Model generations with `temperature > 0.0` bypass the response cache by default to prevent frozen non-deterministic responses, unless explicitly opted into via `x-retoken-cache-stochastic: true`.
+- **Configuration File & Environment Overrides**: Automatically loads `retoken.json`, `.retoken.json`, or `.retoken/config.json` from the repository root, with explicit syntax warnings on invalid JSON and seamless environment variable overrides (`RETOKEN_*`).
+- **SSRF Protection, Host Allowlists & Redirect Policy**: Custom upstreams passed via `x-retoken-upstream-url` strictly disallow loopback (`127.0.0.0/8`, `localhost`, `::1`), private RFC1918 subnets, IPv6 unique local (`fc00::/7`), link-local (`fe80::/10`), IPv4-mapped addresses (`::ffff:0:0/96`), and cloud metadata addresses (`169.254.169.254`). Hostnames resolving via DNS to private addresses are blocked. Automatic HTTP redirects are disabled on proxy upstream requests to prevent open-redirect SSRF escalation. Specific allowed hosts can be configured via `allowed_upstream_hosts` / `RETOKEN_ALLOWED_UPSTREAM_HOSTS`.
+- **Generation Cache Opt-In**: LLM generation endpoints (`/v1/messages`, `/v1/chat/completions`) require an explicit opt-in header (`x-retoken-cache: true` or `x-retoken-cache-exact: true`) to cache model responses, eliminating stale generation responses from omitted temperatures or implicit sampling parameters.
+- **Context & Credential Cache Isolation**: Cache keys incorporate the upstream base URL, request method, endpoint path, request payload, repository hash, and a SHA-256 fingerprint combining authorization credentials (`Authorization`, `x-api-key`, `api-key`) and provider-differentiating headers (`anthropic-version`, `anthropic-beta`, `openai-organization`, `openai-project`).
+- **Administrative Endpoints**: The running gateway daemon exposes loopback administrative routes `POST /_retoken/cache/clear` and `GET /_retoken/stats` used by `retoken cache clear` and `retoken stats`.
 - **Cache Opt-Out**: Requests with `Cache-Control: no-cache`, `no-store`, `Pragma: no-cache`, or `x-retoken-cache: false` bypass cache lookup and storage entirely.
 - **Request Size Limits & Timeouts**: Request body size is capped by `RETOKEN_MAX_REQUEST_BODY_BYTES` (default 10 MB, returning 413 on exceed). Network requests to upstream providers enforce a strict safety timeout (`upstream_timeout_secs`, default 60s).
 
@@ -109,12 +110,12 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 
 ## Architecture Overview
 
-- **`gateway`**: The core `axum` HTTP proxy handling incoming requests, provider routing, URL normalization, cache lookups, and response processing.
+- **`gateway`**: The core `axum` HTTP proxy handling incoming requests, provider routing, URL normalization, cache lookups, admin endpoints, and response processing.
 - **`compressors`**: Heuristic parsers for log slicing, JSON array collapsing with MAD anomaly detection, base64 roundtripping, and content-addressed CCR storage.
 - **`core`**: Configuration (`AppConfig`), exact response caching (`ResponseCache`), in-memory session state tracking (`StateEngine`), and telemetry metrics (`FlightRecord`).
 - **`retrieval`**: Context budgeting (`ContextPackage`), dependency-aware ranking (`ContextPlanner`), and cache breakpoint formatting (`packer`).
 - **`scheduler`**: Tool call DAG scheduling (`ExecutionDag`), next-file prediction (`Prefetcher`), log virtualization (`slice_log`), and background task tracking (`TaskManager`). Containerized sandbox execution is a roadmap item.
-- **`analyzers`**: AST symbol extraction and dependency graph scanner.
+- **`analyzers`**: Heuristic symbol extraction and dependency graph scanner for Rust, Python, and TypeScript.
 
 ## License
 

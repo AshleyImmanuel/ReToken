@@ -1,5 +1,5 @@
 use retoken_core::config::AppConfig;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 pub async fn run_doctor() -> anyhow::Result<()> {
@@ -27,16 +27,26 @@ pub async fn run_doctor() -> anyhow::Result<()> {
     println!();
 
     // 1. Check local gateway status
-    let proxy_addr = format!("127.0.0.1:{}", config.port);
-    match TcpStream::connect_timeout(&proxy_addr.parse().unwrap(), Duration::from_millis(500)) {
-        Ok(_) => {
+    let proxy_addr_str = format!("127.0.0.1:{}", config.port);
+    match proxy_addr_str.parse::<SocketAddr>() {
+        Ok(addr) => match TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
+            Ok(_) => {
+                println!(
+                    "[OK] Local Gateway: ACTIVE (listening on http://{})",
+                    proxy_addr_str
+                );
+            }
+            Err(_) => {
+                println!(
+                    "[INFO] Local Gateway: NOT RUNNING (start with `retoken run` or use `retoken wrap`)"
+                );
+            }
+        },
+        Err(e) => {
             println!(
-                "[OK] Local Gateway: ACTIVE (listening on http://{})",
-                proxy_addr
+                "[ERROR] Invalid local gateway address '{}': {}",
+                proxy_addr_str, e
             );
-        }
-        Err(_) => {
-            println!("[INFO] Local Gateway: NOT RUNNING (start with `retoken run` or use `retoken wrap`)");
         }
     }
 
@@ -46,27 +56,59 @@ pub async fn run_doctor() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(5))
         .build()?;
 
-    match client.get("https://api.anthropic.com").send().await {
-        Ok(resp) => {
-            println!(
-                "  [OK] Anthropic API (https://api.anthropic.com) - HTTP {}",
-                resp.status()
-            );
-        }
-        Err(e) => {
-            println!("  [WARN] Anthropic API check failed: {}", e);
+    let upstreams_to_check = vec![
+        ("Anthropic API", config.anthropic_base_url.clone()),
+        ("OpenAI API", config.openai_base_url.clone()),
+    ];
+
+    for (name, url) in upstreams_to_check {
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() || status.is_redirection() {
+                    println!("  [OK] {} ({}) - HTTP {} (Healthy)", name, url, status);
+                } else if status == reqwest::StatusCode::UNAUTHORIZED
+                    || status == reqwest::StatusCode::FORBIDDEN
+                    || status == reqwest::StatusCode::NOT_FOUND
+                {
+                    println!(
+                        "  [OK] {} ({}) - HTTP {} (Reachable, provider auth/route responded)",
+                        name, url, status
+                    );
+                } else if status.is_server_error() {
+                    println!(
+                        "  [WARN] {} ({}) - HTTP {} (Provider server error)",
+                        name, url, status
+                    );
+                } else {
+                    println!("  [OK] {} ({}) - HTTP {}", name, url, status);
+                }
+            }
+            Err(e) => {
+                println!("  [WARN] {} ({}) check failed: {}", name, url, e);
+            }
         }
     }
 
-    match client.get("https://api.openai.com").send().await {
-        Ok(resp) => {
-            println!(
-                "  [OK] OpenAI API (https://api.openai.com) - HTTP {}",
-                resp.status()
-            );
+    // Check custom configured upstreams if present in allowed_upstream_hosts
+    for host in &config.allowed_upstream_hosts {
+        if host.starts_with("*.") {
+            continue;
         }
-        Err(e) => {
-            println!("  [WARN] OpenAI API check failed: {}", e);
+        let custom_url = format!("https://{}", host);
+        if custom_url != config.anthropic_base_url && custom_url != config.openai_base_url {
+            match client.get(&custom_url).send().await {
+                Ok(resp) => {
+                    println!(
+                        "  [OK] Custom Upstream ({}) - HTTP {}",
+                        custom_url,
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    println!("  [INFO] Custom Upstream ({}) probe: {}", custom_url, e);
+                }
+            }
         }
     }
 

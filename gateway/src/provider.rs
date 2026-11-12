@@ -1,5 +1,6 @@
 use retoken_core::config::AppConfig;
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 
 /// Supported API providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,29 +29,93 @@ impl Provider {
     }
 }
 
-/// Returns true if the host is a loopback, link-local, or private network address.
-pub fn is_private_or_loopback_host(host: &str) -> bool {
-    let clean = host.trim().trim_start_matches('[').trim_end_matches(']');
-    if clean.eq_ignore_ascii_case("localhost") {
+/// Returns true if an IPv4 address is loopback, private, link-local, broadcast, or unspecified.
+pub fn is_private_or_loopback_ipv4(ipv4: Ipv4Addr) -> bool {
+    ipv4.is_loopback()            // 127.0.0.0/8
+        || ipv4.is_private()      // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+        || ipv4.is_link_local()   // 169.254.0.0/16 (e.g. AWS/GCP metadata)
+        || ipv4.is_broadcast()    // 255.255.255.255
+        || ipv4.is_unspecified() // 0.0.0.0
+}
+
+/// Returns true if an IPv6 address is loopback, unspecified, unique local (ULA), link-local, or IPv4-mapped private.
+pub fn is_private_or_loopback_ipv6(ipv6: Ipv6Addr) -> bool {
+    if ipv6.is_loopback() || ipv6.is_unspecified() {
         return true;
     }
-    if let Ok(ip) = clean.parse::<std::net::IpAddr>() {
-        match ip {
-            std::net::IpAddr::V4(ipv4) => {
-                ipv4.is_loopback()            // 127.0.0.0/8
-                    || ipv4.is_private()      // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-                    || ipv4.is_link_local()   // 169.254.0.0/16 (e.g. AWS/GCP metadata)
-                    || ipv4.is_broadcast()    // 255.255.255.255
-                    || ipv4.is_unspecified() // 0.0.0.0
-            }
-            std::net::IpAddr::V6(ipv6) => {
-                ipv6.is_loopback()            // ::1
-                    || ipv6.is_unspecified() // ::
+    // Check for IPv4-mapped IPv6 address (::ffff:x.x.x.x) or IPv4-compatible
+    let segments = ipv6.segments();
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0xffff
+    {
+        let v4 = Ipv4Addr::new(
+            (segments[6] >> 8) as u8,
+            segments[6] as u8,
+            (segments[7] >> 8) as u8,
+            segments[7] as u8,
+        );
+        return is_private_or_loopback_ipv4(v4);
+    }
+    // Also check standard to_ipv4()
+    if let Some(v4) = ipv6.to_ipv4() {
+        if is_private_or_loopback_ipv4(v4) {
+            return true;
+        }
+    }
+    // fc00::/7 Unique Local Address (ULA)
+    if (segments[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    // fe80::/10 Link-Local Unicast
+    if (segments[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    false
+}
+
+/// Returns true if an IP address is private, loopback, or local network.
+pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_or_loopback_ipv4(v4),
+        IpAddr::V6(v6) => is_private_or_loopback_ipv6(v6),
+    }
+}
+
+/// Returns true if the host is a loopback, link-local, or private network address,
+/// or resolves to one via DNS.
+pub fn is_private_or_loopback_host(host: &str) -> bool {
+    let clean = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let lower = clean.to_ascii_lowercase();
+
+    if lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+        || lower.ends_with(".intranet")
+        || lower.ends_with(".onion")
+        || lower.ends_with(".corp")
+    {
+        return true;
+    }
+
+    if let Ok(ip) = clean.parse::<IpAddr>() {
+        return is_private_or_loopback_ip(ip);
+    }
+
+    // Attempt DNS lookup. If any resolved IP targets a private or loopback address, reject.
+    if let Ok(addrs) = (clean, 80).to_socket_addrs() {
+        for addr in addrs {
+            if is_private_or_loopback_ip(addr.ip()) {
+                return true;
             }
         }
-    } else {
-        false
     }
+
+    false
 }
 
 /// Checks whether a host matches an allowlist of patterns (supporting exact match and `*.domain` wildcards).
@@ -385,13 +450,23 @@ mod tests {
         // SSRF protection: loopback and private IPs rejected when allow_private=false
         assert!(validate_upstream_url("http://127.0.0.1:11434", false, &[]).is_err());
         assert!(validate_upstream_url("http://localhost:3000", false, &[]).is_err());
+        assert!(validate_upstream_url("http://service.local:8080", false, &[]).is_err());
+        assert!(validate_upstream_url("http://metadata.internal", false, &[]).is_err());
         assert!(validate_upstream_url("http://169.254.169.254/latest", false, &[]).is_err());
         assert!(validate_upstream_url("http://10.0.0.1/api", false, &[]).is_err());
         assert!(validate_upstream_url("http://192.168.1.1/api", false, &[]).is_err());
 
+        // IPv6 SSRF protection: loopback, ULA, link-local, IPv4-mapped
+        assert!(validate_upstream_url("http://[::1]:8080", false, &[]).is_err());
+        assert!(validate_upstream_url("http://[fd00::1]/v1", false, &[]).is_err());
+        assert!(validate_upstream_url("http://[fe80::1]/v1", false, &[]).is_err());
+        assert!(validate_upstream_url("http://[::ffff:127.0.0.1]/v1", false, &[]).is_err());
+        assert!(validate_upstream_url("http://[::ffff:169.254.169.254]/v1", false, &[]).is_err());
+
         // Allowed when allow_private=true
         assert!(validate_upstream_url("http://127.0.0.1:11434", true, &[]).is_ok());
         assert!(validate_upstream_url("http://localhost:3000", true, &[]).is_ok());
+        assert!(validate_upstream_url("http://[::1]:8080", true, &[]).is_ok());
 
         // Host allowlist enforcement
         let allowlist = vec!["api.groq.com".into(), "*.together.xyz".into()];

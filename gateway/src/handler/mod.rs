@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod cache;
 pub mod response;
 pub mod state;
@@ -35,6 +36,7 @@ pub struct GatewayState {
     pub response_cache: Arc<Mutex<ResponseCache>>,
     pub config: AppConfig,
     pub ccr_store: Arc<CcrStore>,
+    pub start_time: std::time::Instant,
 }
 
 pub async fn handler(
@@ -169,13 +171,8 @@ pub async fn handler(
         .find(|(n, _)| n.eq_ignore_ascii_case("x-retoken-repo-hash"))
         .map(|(_, v)| v.as_str());
 
-    // Extract auth fingerprint for strict credential isolation
-    let auth_fingerprint = req_headers
-        .iter()
-        .find(|(n, _)| {
-            n.eq_ignore_ascii_case("authorization") || n.eq_ignore_ascii_case("x-api-key")
-        })
-        .map(|(_, v)| ResponseCache::hash_credential(v));
+    // Extract auth and parameter fingerprint for strict credential and context isolation
+    let auth_fingerprint = ResponseCache::compute_context_fingerprint(&req_headers);
 
     // Check for cache opt-out / no-cache directives
     let header_no_cache = req_headers.iter().any(|(n, v)| {
@@ -187,20 +184,33 @@ pub async fn handler(
             || (n.eq_ignore_ascii_case("x-retoken-no-cache") && (v == "true" || v == "1"))
     });
 
+    // LLM generation endpoints (/messages, /chat/completions) require explicit opt-in to cache
+    // to prevent returning stale model generations when temperature is omitted or implicit sampling occurs
+    let is_generation = is_generation_endpoint(path_and_query);
+    let allow_generation_cache = req_headers.iter().any(|(n, v)| {
+        (n.eq_ignore_ascii_case("x-retoken-cache") && (v == "true" || v == "1"))
+            || (n.eq_ignore_ascii_case("x-retoken-cache-exact") && (v == "true" || v == "1"))
+            || (n.eq_ignore_ascii_case("x-retoken-cache-stochastic") && (v == "true" || v == "1"))
+    });
+    let generation_bypassed = is_generation && !allow_generation_cache;
+
     // Non-zero temperature completions are non-deterministic; bypass cache unless client explicitly requests caching stochastic responses
     let is_stochastic = temperature.is_some_and(|t| t > 0.0);
     let allow_stochastic_cache = req_headers.iter().any(|(n, v)| {
         n.eq_ignore_ascii_case("x-retoken-cache-stochastic") && (v == "true" || v == "1")
     });
     let stochastic_bypassed = is_stochastic && !allow_stochastic_cache;
-    let no_cache = header_no_cache || stochastic_bypassed;
+    let no_cache = header_no_cache || generation_bypassed || stochastic_bypassed;
 
-    // Exact Cache Lookup (NEVER check or return cache for streaming, stochastic, or no-cache requests)
+    let upstream_base = detected_provider.base_url(&state.config);
+
+    // Exact Cache Lookup (NEVER check or return cache for streaming, generation-bypassed, stochastic, or no-cache requests)
     if state.config.cache_enabled && !is_stream && !no_cache {
         let cache_key = ResponseCache::cache_key_with_context(
             method.as_str(),
             path_and_query,
             detected_provider.name(),
+            Some(upstream_base),
             &final_bytes,
             repo_hash,
             auth_fingerprint.as_deref(),
@@ -254,6 +264,7 @@ pub async fn handler(
         resp,
         is_stream,
         &detected_provider,
+        Some(upstream_base),
         &mut record,
         &state.ccr_store,
         state.config.cache_enabled,
@@ -264,4 +275,29 @@ pub async fn handler(
         auth_fingerprint.as_deref(),
     )
     .await
+}
+
+/// Returns true if the request path targets an LLM completion/generation endpoint.
+pub fn is_generation_endpoint(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("/messages")
+        || lower.contains("/chat/completions")
+        || lower.contains("/completions")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_generation_endpoint() {
+        assert!(is_generation_endpoint("/v1/messages"));
+        assert!(is_generation_endpoint("/messages"));
+        assert!(is_generation_endpoint("/v1/chat/completions"));
+        assert!(is_generation_endpoint("/chat/completions"));
+        assert!(is_generation_endpoint("/v1/completions"));
+        assert!(!is_generation_endpoint("/v1/models"));
+        assert!(!is_generation_endpoint("/v1/embeddings"));
+        assert!(!is_generation_endpoint("/_retoken/stats"));
+    }
 }

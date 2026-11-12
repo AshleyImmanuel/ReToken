@@ -8,8 +8,12 @@ on:
 
 jobs:
   test:
-    name: Test Suite
-    runs-on: ubuntu-latest
+    name: Test Suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -18,7 +22,8 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Check Formatting
+      - name: Check Formatting (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --check
 
       - name: Clippy Lints

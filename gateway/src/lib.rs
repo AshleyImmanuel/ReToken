@@ -35,9 +35,18 @@ pub fn app_with_client(
         response_cache,
         config,
         ccr_store,
+        start_time: std::time::Instant::now(),
     });
 
     Router::new()
+        .route(
+            "/_retoken/cache/clear",
+            axum::routing::post(handler::admin::admin_cache_clear),
+        )
+        .route(
+            "/_retoken/stats",
+            axum::routing::get(handler::admin::admin_stats),
+        )
         .route("/*path", any(gateway_handler))
         .route("/", any(gateway_handler))
         .with_state(state)
@@ -57,6 +66,7 @@ pub fn app(state_engine: Arc<Mutex<StateEngine>>, config: AppConfig) -> Router {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(config.upstream_timeout_secs))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 

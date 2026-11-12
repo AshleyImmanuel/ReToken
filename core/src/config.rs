@@ -86,10 +86,27 @@ impl AppConfig {
     fn load_from_file_or_default() -> Self {
         let candidates = ["retoken.json", ".retoken.json", ".retoken/config.json"];
         for path in &candidates {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
-                    tracing::info!("Loaded configuration from {}", path);
-                    return config;
+            if std::path::Path::new(path).exists() {
+                match std::fs::read_to_string(path) {
+                    Ok(content) => match serde_json::from_str::<AppConfig>(&content) {
+                        Ok(config) => {
+                            tracing::info!("Loaded configuration from {}", path);
+                            return config;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to parse configuration file '{}': {}. Falling back to default configuration.",
+                                path, e
+                            );
+                            eprintln!(
+                                "[WARN] Failed to parse config file '{}': {}. Falling back to default configuration.",
+                                path, e
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to read configuration file '{}': {}", path, e);
+                    }
                 }
             }
         }

@@ -43,11 +43,12 @@ impl ResponseCache {
         }
     }
 
-    /// Compute a cache key including full request context and credential isolation (SHA256 hex digest).
+    /// Compute a cache key including full request context, upstream base URL, and credential isolation (SHA256 hex digest).
     pub fn cache_key_with_context(
         method: &str,
         path: &str,
         provider: &str,
+        upstream_base: Option<&str>,
         request_body: &[u8],
         context_hash: Option<&str>,
         auth_fingerprint: Option<&str>,
@@ -59,6 +60,10 @@ impl ResponseCache {
         hasher.update(path.as_bytes());
         hasher.update(b":");
         hasher.update(provider.as_bytes());
+        if let Some(base) = upstream_base {
+            hasher.update(b"@base:");
+            hasher.update(base.as_bytes());
+        }
         hasher.update(b":");
         hasher.update(request_body);
         if let Some(hash) = context_hash {
@@ -73,6 +78,42 @@ impl ResponseCache {
         result.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
+    /// Compute a SHA256 fingerprint from credentials and response-affecting headers.
+    pub fn compute_context_fingerprint(headers: &[(String, String)]) -> Option<String> {
+        use sha2::{Digest, Sha256};
+        let mut relevant: Vec<(&str, &str)> = headers
+            .iter()
+            .filter_map(|(k, v)| {
+                let lower = k.to_ascii_lowercase();
+                match lower.as_str() {
+                    "authorization"
+                    | "x-api-key"
+                    | "api-key"
+                    | "anthropic-version"
+                    | "anthropic-beta"
+                    | "openai-organization"
+                    | "openai-project" => Some((k.as_str(), v.as_str())),
+                    _ => None,
+                }
+            })
+            .collect();
+
+        if relevant.is_empty() {
+            return None;
+        }
+
+        relevant.sort_by_key(|a| a.0.to_ascii_lowercase());
+        let mut hasher = Sha256::new();
+        for (k, v) in relevant {
+            hasher.update(k.to_ascii_lowercase().as_bytes());
+            hasher.update(b":");
+            hasher.update(v.as_bytes());
+            hasher.update(b"\n");
+        }
+        let result = hasher.finalize();
+        Some(result.iter().map(|b| format!("{:02x}", b)).collect())
+    }
+
     /// Compute a SHA256 hex digest fingerprint for an authentication credential.
     pub fn hash_credential(credential: &str) -> String {
         use sha2::{Digest, Sha256};
@@ -84,7 +125,7 @@ impl ResponseCache {
 
     /// Legacy / simple cache key computation from request body and optional context hash.
     pub fn cache_key(request_body: &[u8], context_hash: Option<&str>) -> String {
-        Self::cache_key_with_context("", "", "", request_body, context_hash, None)
+        Self::cache_key_with_context("", "", "", None, request_body, context_hash, None)
     }
 
     /// Look up a cache entry by key. Returns `None` if not found or expired.
@@ -173,6 +214,11 @@ impl ResponseCache {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Maximum capacity of the cache.
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +232,7 @@ mod tests {
             "POST",
             "/v1/messages",
             "anthropic",
+            Some("https://api.anthropic.com"),
             body,
             None,
             None,
@@ -194,6 +241,7 @@ mod tests {
             "POST",
             "/v1/chat/completions",
             "openai",
+            Some("https://api.openai.com"),
             body,
             None,
             None,
@@ -202,6 +250,7 @@ mod tests {
             "GET",
             "/v1/messages",
             "anthropic",
+            Some("https://api.anthropic.com"),
             body,
             None,
             None,
@@ -210,6 +259,7 @@ mod tests {
             "POST",
             "/v1/messages",
             "anthropic",
+            Some("https://api.anthropic.com"),
             body,
             Some("repo1"),
             None,
@@ -218,6 +268,7 @@ mod tests {
             "POST",
             "/v1/messages",
             "anthropic",
+            Some("https://api.anthropic.com"),
             body,
             None,
             Some("user1_auth_hash"),
@@ -226,9 +277,19 @@ mod tests {
             "POST",
             "/v1/messages",
             "anthropic",
+            Some("https://api.anthropic.com"),
             body,
             None,
             Some("user2_auth_hash"),
+        );
+        let k7 = ResponseCache::cache_key_with_context(
+            "POST",
+            "/v1/messages",
+            "anthropic",
+            Some("https://custom.upstream.org"),
+            body,
+            None,
+            None,
         );
 
         assert_ne!(k1, k2, "different paths/providers must not collide");
@@ -239,6 +300,37 @@ mod tests {
             "credentialed requests must not collide with uncredentialed"
         );
         assert_ne!(k5, k6, "different user credentials must isolate cache keys");
+        assert_ne!(
+            k1, k7,
+            "different upstream base URLs must isolate cache keys"
+        );
+    }
+
+    #[test]
+    fn test_compute_context_fingerprint() {
+        let headers1 = vec![
+            ("Authorization".to_string(), "Bearer sk-123".to_string()),
+            ("openai-organization".to_string(), "org-1".to_string()),
+        ];
+        let headers2 = vec![
+            ("openai-organization".to_string(), "org-1".to_string()),
+            ("authorization".to_string(), "Bearer sk-123".to_string()),
+        ];
+        let headers3 = vec![
+            ("Authorization".to_string(), "Bearer sk-123".to_string()),
+            ("openai-organization".to_string(), "org-2".to_string()),
+        ];
+
+        let fp1 = ResponseCache::compute_context_fingerprint(&headers1);
+        let fp2 = ResponseCache::compute_context_fingerprint(&headers2);
+        let fp3 = ResponseCache::compute_context_fingerprint(&headers3);
+
+        assert!(fp1.is_some());
+        assert_eq!(fp1, fp2, "header order or case must not alter fingerprint");
+        assert_ne!(
+            fp1, fp3,
+            "differing organization must yield different fingerprint"
+        );
     }
 
     #[test]

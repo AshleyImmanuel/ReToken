@@ -46,6 +46,16 @@
   * Added integration tests covering host allowlist enforcement and stochastic temperature cache bypass.
   * Expanded workspace test coverage from 23 to 71 passing tests with 0 failures across all crates.
   * Verified code quality with `cargo fmt --check`, `cargo test --workspace`, and `cargo build --workspace`.
+* **Hardened Cache Policy, Comprehensive SSRF & Administrative Runtime**:
+  * **Generation Endpoint Default Cache Opt-In**: Disabled response caching by default for LLM generation endpoints (`/v1/messages`, `/v1/chat/completions`, `/completions`) to eliminate stale completions from omitted temperature or implicit model sampling. Required explicit opt-in headers (`x-retoken-cache: true` or `x-retoken-cache-exact: true`) to enable generation response caching.
+  * **Comprehensive IPv6, Link-Local & DNS SSRF Hardening**: Expanded `gateway/src/provider.rs` SSRF validation to reject IPv6 loopback (`::1`), unspecified (`::`), unique local addresses (`fc00::/7`), link-local unicast (`fe80::/10`), IPv4-mapped addresses (`::ffff:0:0/96`), and domains resolving via DNS to private or loopback IPs.
+  * **Upstream Redirect Policy**: Disabled automatic HTTP redirects on the proxy's `reqwest::Client` (`redirect::Policy::none()`), preventing open-redirect SSRF escalation to internal services.
+  * **Context & Upstream Cache Key Isolation**: Bound the upstream base URL directly into `ResponseCache::cache_key_with_context` to guarantee separation between disparate providers and endpoints. Added `ResponseCache::compute_context_fingerprint` incorporating credentials and response-affecting headers (`authorization`, `x-api-key`, `api-key`, `anthropic-version`, `anthropic-beta`, `openai-organization`, `openai-project`).
+  * **Gateway Administrative Endpoints**: Implemented loopback administrative routes `POST /_retoken/cache/clear` (purging in-memory cache and reporting cleared entry count) and `GET /_retoken/stats` (reporting live uptime, hit/miss metrics, and cache utilization).
+  * **CLI Telemetry & Cache Integration**: Connected `retoken cache clear` to send an administrative purge request to the running gateway daemon, and enhanced `retoken stats` and `retoken cache status` to display live runtime statistics when the gateway is active.
+  * **Doctor Diagnostics & Config Parsing Warnings**: Removed `.unwrap()` on socket parsing in `retoken doctor`, properly categorized HTTP response statuses (2xx/3xx healthy, 401/403/404 reachable with provider response, 5xx server error), and added custom upstream probe testing. Updated `AppConfig` to emit warnings on invalid JSON in configuration files instead of silently ignoring parse errors.
+  * **Cross-Platform Matrix CI**: Updated `.github/workflows/ci.yml` to run tests and builds across a multi-OS matrix (`ubuntu-latest`, `windows-latest`, `macos-latest`).
+  * **Expanded Test Suite**: Added tests for generation cache bypass by default, admin clear/stats endpoints, IPv6/DNS SSRF validation, and context fingerprinting, bringing the workspace test suite to 75 passing tests with 0 failures.
 
 ### Antigravity (2026-09-29)
 * **Optimization & Modularization**: 

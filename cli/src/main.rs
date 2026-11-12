@@ -72,10 +72,10 @@ async fn main() -> anyhow::Result<()> {
             doctor::run_doctor().await?;
         }
         Commands::Stats => {
-            stats::run_stats()?;
+            stats::run_stats().await?;
         }
         Commands::Cache { action } => {
-            cache_cmd::run_cache(action)?;
+            cache_cmd::run_cache(action).await?;
         }
     }
 
