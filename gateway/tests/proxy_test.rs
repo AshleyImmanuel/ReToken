@@ -1089,3 +1089,220 @@ async fn test_opt_in_prompt_caching_injects_breakpoints() {
     assert!(forwarded_str.contains("cache_control"));
     assert!(forwarded_str.contains("ephemeral"));
 }
+
+#[tokio::test]
+async fn test_live_ccr_multi_turn_flow() {
+    let turn_counter = Arc::new(tokio::sync::Mutex::new(0));
+    let tc_clone = turn_counter.clone();
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let handle = ccr_store
+        .store(b"CRITICAL_DATABASE_CRASH_LOG", "crash_log")
+        .unwrap();
+    let handle_clone = handle.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let tc = tc_clone.clone();
+            let h = handle_clone.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let req_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let mut count = tc.lock().await;
+                *count += 1;
+
+                if *count == 1 {
+                    // Turn 1: Upstream model invokes retoken_retrieve tool
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                            "id": "msg_turn1",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_recover_01",
+                                    "name": "retoken_retrieve",
+                                    "input": {"handle": h}
+                                }
+                            ],
+                            "stop_reason": "tool_use"
+                        })).unwrap()))
+                        .unwrap()
+                } else {
+                    // Turn 2: Verify model received the tool_result follow-up turn
+                    let messages = req_json["messages"].as_array().unwrap();
+                    assert_eq!(messages.len(), 3);
+                    assert_eq!(messages[1]["role"], "assistant");
+                    assert_eq!(messages[2]["role"], "user");
+                    let tool_result_content = messages[2]["content"][0]["content"].as_str().unwrap();
+                    assert!(tool_result_content.contains("CRITICAL_DATABASE_CRASH_LOG"));
+
+                    // Upstream model reasons over recovered data and delivers final answer
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                            "id": "msg_turn2",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "The crash was caused by connection timeout in database pool."
+                                }
+                            ],
+                            "stop_reason": "end_turn"
+                        })).unwrap()))
+                        .unwrap()
+                }
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.ccr_enabled = true; // Enable live CCR multi-turn resolution
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let payload = serde_json::json!({
+        "model": "claude-3-opus",
+        "messages": [
+            {"role": "user", "content": "Analyze crash error log."}
+        ]
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resp_json: serde_json::Value = serde_json::from_slice(&resp_bytes).unwrap();
+
+    // Verify client received the model's authentic reasoned answer with end_turn
+    assert_eq!(resp_json["stop_reason"], "end_turn");
+    let content_text = resp_json["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        content_text,
+        "The crash was caused by connection timeout in database pool."
+    );
+
+    // Verify mock upstream executed 2 turns (turn 1 tool_use + turn 2 tool_result)
+    assert_eq!(*turn_counter.lock().await, 2);
+}
+
+#[tokio::test]
+async fn test_compression_enabled_preserves_comments_in_tool_output() {
+    let captured_body = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let cap_clone = captured_body.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let cap = cap_clone.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *cap.lock().await = bytes.to_vec();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"m3","content":[{"type":"text","text":"ok"}]}"#,
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.compression_enabled = true; // Explicitly enable compression
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let code_with_comments = r#"```rust
+// CRITICAL_LOGIC_NOTE: must check caller permissions before withdrawal
+fn withdraw(amount: u64) {
+    // SECURITY_INVARIANT: balance cannot underflow
+    let balance = 1000;
+    // Padding line 1 to make block >= 200 bytes
+    // Padding line 2 to make block >= 200 bytes
+    // Padding line 3 to make block >= 200 bytes
+    // Padding line 4 to make block >= 200 bytes
+    // Padding line 5 to make block >= 200 bytes
+    // Padding line 6 to make block >= 200 bytes
+    execute();
+}
+```"#;
+
+    let payload = serde_json::json!({
+        "model": "claude-3-opus",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01",
+                        "content": code_with_comments
+                    }
+                ]
+            }
+        ]
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let forwarded_bytes = captured_body.lock().await.clone();
+    let forwarded_str = String::from_utf8_lossy(&forwarded_bytes);
+
+    // Comments MUST NOT be stripped even when compression is enabled
+    assert!(forwarded_str
+        .contains("CRITICAL_LOGIC_NOTE: must check caller permissions before withdrawal"));
+    assert!(forwarded_str.contains("SECURITY_INVARIANT: balance cannot underflow"));
+}

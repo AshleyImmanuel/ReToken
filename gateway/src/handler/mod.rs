@@ -327,8 +327,8 @@ pub async fn handler(
 
     record.network_duration_ms = start_time.elapsed().as_millis() as u64;
 
-    let status = resp.status();
-    let resp_headers: Vec<(String, String)> = resp
+    let mut status = resp.status();
+    let mut resp_headers: Vec<(String, String)> = resp
         .headers()
         .iter()
         .filter_map(|(name, value)| {
@@ -339,19 +339,124 @@ pub async fn handler(
         })
         .collect();
 
+    let is_sse = resp_headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("content-type")
+            && v.to_ascii_lowercase().contains("text/event-stream")
+    });
+
+    // Multi-Turn CCR Tool Recovery Loop:
+    // If ccr_enabled is active, the request is non-streaming, Anthropic was detected,
+    // and the provider responded successfully, check if the model invoked `retoken_retrieve`.
+    // If so, do NOT rewrite the assistant's response to fake text. Instead, send a follow-up
+    // request with the tool_result turn so the model actually reasons over the recovered context.
+    let (resp_opt, prebuffered_body) = if state.config.ccr_enabled
+        && !is_stream
+        && !is_sse
+        && detected_provider == Provider::Anthropic
+        && status.is_success()
+    {
+        let mut initial_body = Vec::new();
+        let mut resp_stream = resp;
+        let mut stream_err = false;
+        while let Some(chunk_res) = resp_stream.chunk().await.ok().flatten() {
+            if initial_body.len() + chunk_res.len() > state.config.max_response_body_bytes {
+                stream_err = true;
+                break;
+            }
+            initial_body.extend_from_slice(&chunk_res);
+        }
+
+        if !stream_err {
+            if let Ok(resp_json) = serde_json::from_slice::<serde_json::Value>(&initial_body) {
+                let calls = crate::interceptor::find_ccr_tool_calls(&resp_json);
+                if !calls.is_empty() && json_body.is_some() {
+                    let mut req_body_val = json_body.clone().unwrap();
+                    let (assistant_msg, tool_result_msg) =
+                        crate::interceptor::build_ccr_tool_result_messages(
+                            &resp_json["content"],
+                            &calls,
+                            &state.ccr_store,
+                        );
+
+                    if let Some(messages) = req_body_val
+                        .get_mut("messages")
+                        .and_then(|m| m.as_array_mut())
+                    {
+                        messages.push(assistant_msg);
+                        messages.push(tool_result_msg);
+                    }
+
+                    let mut follow_up_builder = client_to_use.post(target_url.clone());
+                    for (name, val) in &req_headers {
+                        if !is_hop_by_hop_header(name)
+                            && !name.eq_ignore_ascii_case("content-length")
+                        {
+                            follow_up_builder = follow_up_builder.header(name, val);
+                        }
+                    }
+                    let follow_up_bytes = serde_json::to_vec(&req_body_val).unwrap_or_default();
+                    follow_up_builder = follow_up_builder.body(follow_up_bytes);
+
+                    info!(
+                        "CCR: Model requested {} handle(s). Executing multi-turn follow-up request to upstream provider...",
+                        calls.len()
+                    );
+
+                    match follow_up_builder.send().await {
+                        Ok(follow_up_resp) => {
+                            status = follow_up_resp.status();
+                            resp_headers = follow_up_resp
+                                .headers()
+                                .iter()
+                                .filter_map(|(name, value)| {
+                                    value
+                                        .to_str()
+                                        .ok()
+                                        .map(|v| (name.to_string(), v.to_string()))
+                                })
+                                .collect();
+                            let mut follow_up_body = Vec::new();
+                            let mut fu_stream = follow_up_resp;
+                            while let Some(chunk) = fu_stream.chunk().await.ok().flatten() {
+                                if follow_up_body.len() + chunk.len()
+                                    > state.config.max_response_body_bytes
+                                {
+                                    break;
+                                }
+                                follow_up_body.extend_from_slice(&chunk);
+                            }
+                            (None, Some(follow_up_body))
+                        }
+                        Err(e) => {
+                            warn!("CCR follow-up request failed: {}", e);
+                            (None, Some(initial_body))
+                        }
+                    }
+                } else {
+                    (None, Some(initial_body))
+                }
+            } else {
+                (None, Some(initial_body))
+            }
+        } else {
+            (None, Some(initial_body))
+        }
+    } else {
+        (Some(resp), None)
+    };
+
     response::process_response(
         method.as_str(),
         path_and_query,
         status,
         resp_headers,
-        resp,
+        resp_opt,
+        prebuffered_body,
         is_stream,
         state.config.max_response_body_bytes,
         &detected_provider,
         Some(upstream_base),
         &mut record,
-        &state.ccr_store,
-        state.config.ccr_enabled,
         state.config.cache_enabled,
         no_cache,
         &state.response_cache,

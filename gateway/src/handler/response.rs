@@ -1,5 +1,4 @@
 use axum::{body::Body, response::Response};
-use compressors::ccr::CcrStore;
 use retoken_core::cache::ResponseCache;
 use retoken_core::recorder::FlightRecord;
 use std::sync::Arc;
@@ -7,7 +6,6 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use super::cache::build_cache_miss_response;
-use crate::interceptor::intercept_ccr_tool_calls;
 use crate::provider::{extract_token_usage, is_hop_by_hop_header, Provider};
 
 #[allow(clippy::too_many_arguments)]
@@ -16,14 +14,13 @@ pub async fn process_response(
     path_and_query: &str,
     status: reqwest::StatusCode,
     resp_headers: Vec<(String, String)>,
-    resp: reqwest::Response,
+    resp: Option<reqwest::Response>,
+    prebuffered_bytes: Option<Vec<u8>>,
     is_stream: bool,
     max_response_body_bytes: usize,
     detected_provider: &Provider,
     upstream_base: Option<&str>,
     record: &mut FlightRecord,
-    ccr_store: &Arc<CcrStore>,
-    ccr_enabled: bool,
     cache_enabled: bool,
     no_cache: bool,
     response_cache: &Arc<Mutex<ResponseCache>>,
@@ -41,29 +38,33 @@ pub async fn process_response(
 
     // Native Streaming Bypass: preserve protocol, do not buffer, do not cache
     if effective_stream {
-        info!(
-            "Streaming response natively (is_stream={}, is_sse={}, bypassing cache & token extraction)",
-            is_stream, is_sse
-        );
-        telemetry.lock().await.record(record);
-        let stream = resp.bytes_stream();
-        let mut builder = Response::builder().status(status);
-        if let Some(headers) = builder.headers_mut() {
-            for (name, value) in &resp_headers {
-                if is_hop_by_hop_header(name) || name.eq_ignore_ascii_case("content-length") {
-                    continue;
-                }
-                if let (Ok(hn), Ok(hv)) = (
-                    axum::http::header::HeaderName::from_bytes(name.as_bytes()),
-                    axum::http::header::HeaderValue::from_str(value),
-                ) {
-                    headers.insert(hn, hv);
+        if let Some(resp) = resp {
+            info!(
+                "Streaming response natively (is_stream={}, is_sse={}, bypassing cache & token extraction)",
+                is_stream, is_sse
+            );
+            telemetry.lock().await.record(record);
+            let stream = resp.bytes_stream();
+            let mut builder = Response::builder().status(status);
+            if let Some(headers) = builder.headers_mut() {
+                for (name, value) in &resp_headers {
+                    if is_hop_by_hop_header(name) || name.eq_ignore_ascii_case("content-length") {
+                        continue;
+                    }
+                    if let (Ok(hn), Ok(hv)) = (
+                        axum::http::header::HeaderName::from_bytes(name.as_bytes()),
+                        axum::http::header::HeaderValue::from_str(value),
+                    ) {
+                        headers.insert(hn, hv);
+                    }
                 }
             }
+            return builder
+                .body(Body::from_stream(stream))
+                .map_err(|_| axum::http::StatusCode::BAD_GATEWAY);
+        } else {
+            return Err(axum::http::StatusCode::BAD_GATEWAY);
         }
-        return builder
-            .body(Body::from_stream(stream))
-            .map_err(|_| axum::http::StatusCode::BAD_GATEWAY);
     }
 
     // Check upstream Content-Length header against max_response_body_bytes
@@ -85,31 +86,30 @@ pub async fn process_response(
         }
     }
 
-    // Buffer response body safely with bounded limit
-    let mut resp = resp;
-    let mut resp_bytes = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?
-    {
-        if resp_bytes.len() + chunk.len() > max_response_body_bytes {
-            tracing::warn!(
-                "Upstream response body exceeded limit of {} bytes",
-                max_response_body_bytes
-            );
-            record.errors = 1;
-            telemetry.lock().await.record(record);
-            return Err(axum::http::StatusCode::BAD_GATEWAY);
+    // Buffer response body safely with bounded limit (or use prebuffered bytes from multi-turn resolution)
+    let resp_bytes = if let Some(bytes) = prebuffered_bytes {
+        bytes
+    } else if let Some(mut resp) = resp {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|_| axum::http::StatusCode::BAD_GATEWAY)?
+        {
+            if bytes.len() + chunk.len() > max_response_body_bytes {
+                tracing::warn!(
+                    "Upstream response body exceeded limit of {} bytes",
+                    max_response_body_bytes
+                );
+                record.errors = 1;
+                telemetry.lock().await.record(record);
+                return Err(axum::http::StatusCode::BAD_GATEWAY);
+            }
+            bytes.extend_from_slice(&chunk);
         }
-        resp_bytes.extend_from_slice(&chunk);
-    }
-
-    // CCR Tool Call Interception (only if ccr_enabled is true, leaves response unchanged when disabled)
-    let resp_bytes = if ccr_enabled {
-        intercept_ccr_tool_calls(&resp_bytes, ccr_store)
+        bytes
     } else {
-        resp_bytes
+        return Err(axum::http::StatusCode::BAD_GATEWAY);
     };
 
     // Extract Token Usage
