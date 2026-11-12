@@ -343,6 +343,7 @@ pub async fn handler(
         Some(upstream_base),
         &mut record,
         &state.ccr_store,
+        state.config.ccr_enabled,
         state.config.cache_enabled,
         no_cache,
         &state.response_cache,

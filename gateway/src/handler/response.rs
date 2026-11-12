@@ -23,6 +23,7 @@ pub async fn process_response(
     upstream_base: Option<&str>,
     record: &mut FlightRecord,
     ccr_store: &Arc<CcrStore>,
+    ccr_enabled: bool,
     cache_enabled: bool,
     no_cache: bool,
     response_cache: &Arc<Mutex<ResponseCache>>,
@@ -104,8 +105,12 @@ pub async fn process_response(
         resp_bytes.extend_from_slice(&chunk);
     }
 
-    // CCR Tool Call Interception (only transforms supported formats, leaves unsupported unchanged)
-    let resp_bytes = intercept_ccr_tool_calls(&resp_bytes, ccr_store);
+    // CCR Tool Call Interception (only if ccr_enabled is true, leaves response unchanged when disabled)
+    let resp_bytes = if ccr_enabled {
+        intercept_ccr_tool_calls(&resp_bytes, ccr_store)
+    } else {
+        resp_bytes
+    };
 
     // Extract Token Usage
     let usage = extract_token_usage(detected_provider, &resp_bytes);

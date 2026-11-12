@@ -216,9 +216,18 @@ mod tests {
             "ccr_enabled must be false by default to avoid broken retrieval loops"
         );
         assert_eq!(config.max_cache_bytes, 256 * 1024 * 1024);
-        assert!(!config.terse_mode, "terse_mode must be false by default to preserve quality");
-        assert!(!config.compression_enabled, "compression_enabled must be false by default for lossless pass-through");
-        assert!(!config.ccr_enabled, "ccr_enabled must be false by default to avoid broken retrieval loops");
+        assert!(
+            !config.terse_mode,
+            "terse_mode must be false by default to preserve quality"
+        );
+        assert!(
+            !config.compression_enabled,
+            "compression_enabled must be false by default for lossless pass-through"
+        );
+        assert!(
+            !config.ccr_enabled,
+            "ccr_enabled must be false by default to avoid broken retrieval loops"
+        );
         assert_eq!(config.upstream_timeout_secs, 60);
         assert!(config.allowed_upstream_hosts.is_empty());
     }
