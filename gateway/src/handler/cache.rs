@@ -1,7 +1,8 @@
-use axum::response::Response;
 use axum::body::Body;
+use axum::response::Response;
 use retoken_core::recorder::FlightRecord;
-use crate::provider::{extract_token_usage, Provider};
+
+use crate::provider::{extract_token_usage, is_hop_by_hop_header, Provider};
 
 /// Construct an axum Response for a cache hit.
 pub fn build_cache_hit_response(
@@ -21,12 +22,15 @@ pub fn build_cache_hit_response(
 
     tracing::info!("CACHE HIT (saved API call) | {:?}", record);
 
-    let status = axum::http::StatusCode::from_u16(cached_status)
-        .unwrap_or(axum::http::StatusCode::OK);
-    
+    let status =
+        axum::http::StatusCode::from_u16(cached_status).unwrap_or(axum::http::StatusCode::OK);
+
     let mut builder = Response::builder().status(status);
     if let Some(headers) = builder.headers_mut() {
         for (name, value) in cached_headers {
+            if is_hop_by_hop_header(name) || name.eq_ignore_ascii_case("content-length") {
+                continue;
+            }
             if let (Ok(hn), Ok(hv)) = (
                 axum::http::header::HeaderName::from_bytes(name.as_bytes()),
                 axum::http::header::HeaderValue::from_str(value),
@@ -41,7 +45,9 @@ pub fn build_cache_hit_response(
             );
         }
     }
-    Ok(builder.body(Body::from(cached_bytes)).unwrap())
+    builder
+        .body(Body::from(cached_bytes))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Construct an axum Response for a cache miss.
@@ -53,6 +59,9 @@ pub fn build_cache_miss_response(
     let mut builder = Response::builder().status(status);
     if let Some(headers) = builder.headers_mut() {
         for (name, value) in resp_headers {
+            if is_hop_by_hop_header(name) || name.eq_ignore_ascii_case("content-length") {
+                continue;
+            }
             if let (Ok(hn), Ok(hv)) = (
                 axum::http::header::HeaderName::from_bytes(name.as_bytes()),
                 axum::http::header::HeaderValue::from_str(value),
@@ -67,5 +76,7 @@ pub fn build_cache_miss_response(
             );
         }
     }
-    Ok(builder.body(Body::from(resp_bytes)).unwrap())
+    builder
+        .body(Body::from(resp_bytes))
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }

@@ -15,9 +15,20 @@ static IMPORTANT_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// none of these, it cannot match the full regex -- skip the expensive match.
 /// This is the same optimisation applied in `importantLogLine()`.
 const FAST_LITERALS: &[&str] = &[
-    "error", "fatal", "panic", "exception", "traceback",
-    "fail", "warn", ".go:", ".rs:", ".py:", ".js:", ".ts:",
-    "caused by", "thread",
+    "error",
+    "fatal",
+    "panic",
+    "exception",
+    "traceback",
+    "fail",
+    "warn",
+    ".go:",
+    ".rs:",
+    ".py:",
+    ".js:",
+    ".ts:",
+    "caused by",
+    "thread",
 ];
 
 /// Returns true when `line` carries signal: errors, stack frames, warnings.
@@ -39,9 +50,8 @@ fn is_important_line(line: &str) -> bool {
 }
 
 /// Marker previously emitted by ReToken, kept on re-compression for idempotency.
-static LOG_MARKER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"lines elided \(retoken\)").expect("LOG_MARKER_RE must compile")
-});
+static LOG_MARKER_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"lines elided \(retoken\)").expect("LOG_MARKER_RE must compile"));
 
 /// Compresses log/command output using advanced heuristics:
 ///
@@ -138,8 +148,8 @@ mod tests {
 
         let compressed = compress_logs(&log);
         assert!(compressed.contains("ERROR: something broke"));
-        assert!(compressed.contains("step 0"));  // head
-        assert!(compressed.contains("step 1"));  // head
+        assert!(compressed.contains("step 0")); // head
+        assert!(compressed.contains("step 1")); // head
         assert!(compressed.contains("step 19")); // tail
         assert!(compressed.contains("step 18")); // tail
         assert!(compressed.contains("lines elided (retoken)"));

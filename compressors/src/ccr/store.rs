@@ -1,5 +1,4 @@
-
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -79,7 +78,11 @@ impl CcrStore {
             HashMap::new()
         };
 
-        info!("CCR store opened at {} ({} entries)", path.display(), entries.len());
+        info!(
+            "CCR store opened at {} ({} entries)",
+            path.display(),
+            entries.len()
+        );
 
         Ok(Self {
             inner: Arc::new(Mutex::new(CcrInner {
@@ -105,14 +108,16 @@ impl CcrStore {
 
     /// Gets the most recent state of a file from the session cache for Contextual Delta Encoding.
     pub fn get_file_state(&self, path: &str) -> Option<String> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.file_states.get(path).cloned()
     }
 
     /// Saves the most recent state of a file in the session cache.
     pub fn set_file_state(&self, path: &str, content: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.file_states.insert(path.to_string(), content.to_string());
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner
+            .file_states
+            .insert(path.to_string(), content.to_string());
     }
 
     /// Compute the content-addressed handle for a byte slice: `ccr:<sha256_hex>`.
@@ -156,7 +161,10 @@ impl CcrStore {
             inner.flush();
         }
 
-        debug!("CCR stored: {} ({} bytes, type={})", handle, size, content_type);
+        debug!(
+            "CCR stored: {} ({} bytes, type={})",
+            handle, size, content_type
+        );
         Ok(handle)
     }
 
@@ -230,4 +238,3 @@ impl Drop for CcrStore {
         self.flush();
     }
 }
-

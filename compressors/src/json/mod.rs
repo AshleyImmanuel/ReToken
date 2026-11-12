@@ -29,7 +29,12 @@ pub fn compress_json_heuristic_tracked(value: &Value, elision_note: &str) -> (Va
 }
 
 /// Recursively transforms the value. `preserve` is set inside error/message subtrees.
-fn transform(v: &Value, preserve: bool, config: &JsonCompressorConfig, collapsed: &mut bool) -> Value {
+fn transform(
+    v: &Value,
+    preserve: bool,
+    config: &JsonCompressorConfig,
+    collapsed: &mut bool,
+) -> Value {
     match v {
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
@@ -98,9 +103,7 @@ mod tests {
 
     #[test]
     fn error_elements_are_kept() {
-        let mut arr: Vec<Value> = (0..20)
-            .map(|i| json!({"id": i, "status": "ok"}))
-            .collect();
+        let mut arr: Vec<Value> = (0..20).map(|i| json!({"id": i, "status": "ok"})).collect();
         arr[7] = json!({"id": 7, "status": "error", "message": "disk full"});
         arr[15] = json!({"id": 15, "status": "failed", "reason": "timeout"});
 
@@ -139,9 +142,7 @@ mod tests {
 
     #[test]
     fn idempotent() {
-        let arr: Vec<Value> = (0..20)
-            .map(|i| json!({"id": i, "val": 42}))
-            .collect();
+        let arr: Vec<Value> = (0..20).map(|i| json!({"id": i, "val": 42})).collect();
         let input = Value::Array(arr);
         let first = compress_json_heuristic(&input);
         let second = compress_json_heuristic(&first);

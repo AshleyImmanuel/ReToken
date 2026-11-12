@@ -1,28 +1,30 @@
 pub mod cache;
-pub mod state;
 pub mod response;
+pub mod state;
 
 use axum::{
     body::Body,
     extract::{Request, State},
     response::Response,
 };
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{info, warn};
-use std::time::Instant;
-
-use retoken_core::recorder::FlightRecord;
-use retoken_core::state::StateEngine;
-use retoken_core::cache::ResponseCache;
-use retoken_core::config::AppConfig;
 use compressors::ccr::CcrStore;
 use reqwest::Client;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
+use tracing::{info, warn};
 
-use crate::provider::{detect_provider, is_sensitive_header};
+use retoken_core::cache::ResponseCache;
+use retoken_core::config::AppConfig;
+use retoken_core::recorder::FlightRecord;
+use retoken_core::state::StateEngine;
+
 use crate::bypass::forward_raw;
 use crate::optimizer;
-
+use crate::provider::{
+    build_target_url, detect_provider, is_hop_by_hop_header, is_internal_header,
+    is_sensitive_header,
+};
 
 use self::cache::build_cache_hit_response;
 use self::state::insert_into_state_engine;
@@ -52,16 +54,34 @@ pub async fn handler(
     info!("Intercepted: {} {}", method, path_and_query);
 
     let (parts, body) = req.into_parts();
-    
+
     // Collect headers
-    let req_headers: Vec<(String, String)> = parts.headers.iter()
-        .map(|(name, value)| {
-            (name.to_string(), value.to_str().unwrap_or("").to_string())
-        })
+    let req_headers: Vec<(String, String)> = parts
+        .headers
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_string()))
         .collect();
 
-    let detected_provider = detect_provider(path_and_query, &req_headers);
-    let target_url = format!("{}{}", detected_provider.base_url(&state.config), path_and_query);
+    let detected_provider = match detect_provider(path_and_query, &req_headers) {
+        Ok(p) => p,
+        Err(err) => {
+            warn!("Provider detection error: {}", err);
+            return Err(axum::http::StatusCode::BAD_REQUEST);
+        }
+    };
+
+    let target_url = match build_target_url(
+        detected_provider.base_url(&state.config),
+        path_and_query,
+        &detected_provider,
+    ) {
+        Ok(url) => url,
+        Err(err) => {
+            warn!("Failed to build target URL: {}", err);
+            return Err(axum::http::StatusCode::BAD_REQUEST);
+        }
+    };
+
     info!("Provider: {} -> {}", detected_provider.name(), target_url);
 
     let mut record = FlightRecord {
@@ -73,11 +93,20 @@ pub async fn handler(
     // Build outbound request
     let mut req_builder = state.client.request(method.clone(), &target_url);
     for (header_name, header_value) in parts.headers.iter() {
-        if header_name != axum::http::header::HOST {
+        let name_str = header_name.as_str();
+        if header_name != axum::http::header::HOST
+            && header_name != axum::http::header::CONTENT_LENGTH
+            && !is_hop_by_hop_header(name_str)
+            && !is_internal_header(name_str)
+        {
             req_builder = req_builder.header(header_name, header_value);
         }
-        if !is_sensitive_header(header_name.as_str()) {
-            info!("  Header: {}: {}", header_name, header_value.to_str().unwrap_or("[binary]"));
+        if !is_sensitive_header(name_str) {
+            info!(
+                "  Header: {}: {}",
+                header_name,
+                header_value.to_str().unwrap_or("[binary]")
+            );
         }
     }
 
@@ -89,7 +118,7 @@ pub async fn handler(
     let original_size = bytes.len();
 
     let mut json_body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-    
+
     let mut is_stream = false;
     if let Some(ref jb) = json_body {
         if let Some(model) = jb.get("model").and_then(|m| m.as_str()) {
@@ -100,7 +129,7 @@ pub async fn handler(
         }
     }
 
-    // Apply Optimizations (now with heuristic pipeline)
+    // Apply Optimizations
     let final_bytes = if let Some(ref mut body_json) = json_body {
         optimizer::optimize_payload(
             body_json,
@@ -118,15 +147,22 @@ pub async fn handler(
     // Insert into Context State Engine
     insert_into_state_engine(&state.state_engine, &final_bytes, target_url.clone()).await;
 
-    let repo_hash = req_headers.iter()
+    let repo_hash = req_headers
+        .iter()
         .find(|(n, _)| n.eq_ignore_ascii_case("x-retoken-repo-hash"))
         .map(|(_, v)| v.as_str());
 
-    // Exact Cache Lookup
-    if state.config.cache_enabled {
-        let cache_key = ResponseCache::cache_key(&final_bytes, repo_hash);
+    // Exact Cache Lookup (NEVER check or return cache for streaming requests)
+    if state.config.cache_enabled && !is_stream {
+        let cache_key = ResponseCache::cache_key_with_context(
+            method.as_str(),
+            path_and_query,
+            detected_provider.name(),
+            &final_bytes,
+            repo_hash,
+        );
         let mut cache = state.response_cache.lock().await;
-        
+
         if let Some(cached) = cache.get(&cache_key) {
             return build_cache_hit_response(
                 cached.response_status,
@@ -141,7 +177,9 @@ pub async fn handler(
 
     // Forward to Provider
     let reqwest_body = reqwest::Body::from(final_bytes.clone());
-    let reqwest_req = req_builder.body(reqwest_body).build()
+    let reqwest_req = req_builder
+        .body(reqwest_body)
+        .build()
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
     let resp = state.client.execute(reqwest_req).await.map_err(|e| {
@@ -153,13 +191,20 @@ pub async fn handler(
     record.network_duration_ms = start_time.elapsed().as_millis() as u64;
 
     let status = resp.status();
-    let resp_headers: Vec<(String, String)> = resp.headers().iter()
+    let resp_headers: Vec<(String, String)> = resp
+        .headers()
+        .iter()
         .filter_map(|(name, value)| {
-            value.to_str().ok().map(|v| (name.to_string(), v.to_string()))
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.to_string(), v.to_string()))
         })
         .collect();
 
     response::process_response(
+        method.as_str(),
+        path_and_query,
         status,
         resp_headers,
         resp,
@@ -171,5 +216,6 @@ pub async fn handler(
         &state.response_cache,
         &final_bytes,
         repo_hash,
-    ).await
+    )
+    .await
 }

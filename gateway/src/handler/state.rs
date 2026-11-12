@@ -1,6 +1,6 @@
+use retoken_core::state::{StateEngine, StateType};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use retoken_core::state::{StateEngine, StateType};
 use tracing::info;
 
 /// Inserts the payload into the context state engine asynchronously.

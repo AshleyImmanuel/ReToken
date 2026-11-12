@@ -50,7 +50,10 @@ pub fn run_init() -> anyhow::Result<()> {
     }
 
     // Antigravity (Gemini)
-    let agy_dir = Path::new(".gemini").join("config").join("skills").join("retoken");
+    let agy_dir = Path::new(".gemini")
+        .join("config")
+        .join("skills")
+        .join("retoken");
     if !agy_dir.exists() {
         fs::create_dir_all(&agy_dir)?;
     }

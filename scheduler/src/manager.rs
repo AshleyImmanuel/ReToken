@@ -1,9 +1,9 @@
+use crate::task::Task;
+use retoken_core::config::SandboxMode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
-use retoken_core::config::SandboxMode;
-use crate::task::Task;
 
 pub struct TaskManager {
     tasks: Arc<Mutex<HashMap<String, Task>>>,
@@ -22,7 +22,7 @@ impl TaskManager {
     pub async fn submit(&self, command: String) -> String {
         let id = Uuid::new_v4().to_string();
         let mut task = Task::new(id.clone(), command, self.sandbox_mode.clone());
-        
+
         // Register the task as pending
         {
             let mut map = self.tasks.lock().await;
@@ -32,11 +32,11 @@ impl TaskManager {
         // Spawn background execution
         let tasks_ref = self.tasks.clone();
         let task_id = id.clone();
-        
+
         tokio::spawn(async move {
             // Wait for it to execute
             let _ = task.execute().await;
-            
+
             // Update the map with the final state
             let mut map = tasks_ref.lock().await;
             map.insert(task_id, task);

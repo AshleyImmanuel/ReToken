@@ -1,14 +1,18 @@
-use tracing::{info, warn, debug};
 use compressors::ccr::CcrStore;
+use tracing::{info, warn};
 
-/// Intercepts `retoken_retrieve` tool calls in the LLM's response and resolves
-/// them from the CCR store. This makes the retrieval completely transparent to
-/// the client (Antigravity CLI, Claude Code, Cursor, etc).
+/// Intercepts `retoken_retrieve` tool calls in Anthropic's response and resolves
+/// them from the CCR store.
 ///
-/// When the LLM decides it needs elided data, it calls `retoken_retrieve(handle)`.
-/// The proxy intercepts this tool_use block, resolves the handle from SQLite,
-/// and injects the original content back into the response -- the client never
-/// knows the data was compressed.
+/// For Anthropic:
+/// When the model calls `retoken_retrieve(handle)`, the proxy intercepts the `tool_use`
+/// block, resolves the handle from the CCR store, replaces the tool_use block with a text
+/// block containing the recovered data, and updates `stop_reason` to `end_turn` if no other
+/// tool calls remain.
+///
+/// For OpenAI and other unsupported formats:
+/// Transparent single-hop response rewriting without a client execution loop is not
+/// protocol-compliant. Unsupported formats are explicitly left unchanged.
 pub fn intercept_ccr_tool_calls(resp_bytes: &[u8], ccr_store: &CcrStore) -> Vec<u8> {
     let mut resp_json: serde_json::Value = match serde_json::from_slice(resp_bytes) {
         Ok(v) => v,
@@ -32,7 +36,7 @@ pub fn intercept_ccr_tool_calls(resp_bytes: &[u8], ccr_store: &CcrStore) -> Vec<
                     match ccr_store.retrieve(&handle_str) {
                         Ok(Some(data)) => {
                             let content_str = String::from_utf8_lossy(&data);
-                            // Replace the tool_use block with a text block containing the data
+                            // Replace the tool_use block with a text block containing the recovered data
                             *block = serde_json::json!({
                                 "type": "text",
                                 "text": format!("[ReToken CCR Recovery]\n{}", content_str)
@@ -52,58 +56,131 @@ pub fn intercept_ccr_tool_calls(resp_bytes: &[u8], ccr_store: &CcrStore) -> Vec<
         }
     }
 
-    // Check for tool_calls in OpenAI format
-    if let Some(choices) = resp_json.get_mut("choices").and_then(|c| c.as_array_mut()) {
-        for choice in choices.iter_mut() {
-            if let Some(message) = choice.get_mut("message") {
-                if let Some(tool_calls) = message.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-                    for tc in tool_calls.iter_mut() {
-                        if tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str())
-                            == Some("retoken_retrieve")
-                        {
-                            if let Some(args_str) = tc
-                                .get("function")
-                                .and_then(|f| f.get("arguments"))
-                                .and_then(|a| a.as_str())
-                            {
-                                if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
-                                    if let Some(handle) = args.get("handle").and_then(|h| h.as_str()) {
-                                        match ccr_store.retrieve(handle) {
-                                            Ok(Some(data)) => {
-                                                debug!(
-                                                    "CCR intercepted OpenAI tool_call: resolved {}",
-                                                    handle
-                                                );
-                                                // We can't transparently replace in OpenAI format
-                                                // without breaking the protocol. Instead, we note
-                                                // the resolution for the next request cycle.
-                                                intercepted = true;
-                                                info!(
-                                                    "CCR resolved {} ({} bytes) for OpenAI tool_call",
-                                                    handle,
-                                                    data.len()
-                                                );
-                                            }
-                                            Ok(None) => {
-                                                warn!("CCR handle not found: {}", handle);
-                                            }
-                                            Err(e) => {
-                                                warn!("CCR retrieval error: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+    // If we intercepted and resolved tool_use blocks in Anthropic format,
+    // update stop_reason if no tool_use blocks remain
+    if intercepted {
+        if let Some(content) = resp_json.get("content").and_then(|c| c.as_array()) {
+            let has_other_tool_use = content
+                .iter()
+                .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"));
+
+            if !has_other_tool_use {
+                if let Some(stop_reason) = resp_json.get_mut("stop_reason") {
+                    if stop_reason.as_str() == Some("tool_use") {
+                        *stop_reason = serde_json::json!("end_turn");
                     }
                 }
             }
         }
+
+        return serde_json::to_vec(&resp_json).unwrap_or_else(|_| resp_bytes.to_vec());
     }
 
-    if intercepted {
-        serde_json::to_vec(&resp_json).unwrap_or_else(|_| resp_bytes.to_vec())
-    } else {
-        resp_bytes.to_vec()
+    // For OpenAI or unhandled formats: pass response through unchanged
+    resp_bytes.to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_store_with_data(handle: &str, data: &[u8]) -> (CcrStore, String) {
+        let store = CcrStore::open_in_memory().unwrap();
+        let stored_handle = store.store(data, "test").unwrap();
+        assert_eq!(stored_handle, handle);
+        (store, stored_handle)
+    }
+
+    #[test]
+    fn test_anthropic_tool_use_intercepted_and_resolved() {
+        let handle = CcrStore::handle(b"original secret context");
+        let (store, _) = test_store_with_data(&handle, b"original secret context");
+
+        let response = json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01",
+                    "name": "retoken_retrieve",
+                    "input": { "handle": handle }
+                }
+            ],
+            "stop_reason": "tool_use"
+        });
+
+        let resp_bytes = serde_json::to_vec(&response).unwrap();
+        let intercepted = intercept_ccr_tool_calls(&resp_bytes, &store);
+
+        let parsed: serde_json::Value = serde_json::from_slice(&intercepted).unwrap();
+        let content = parsed["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(text.contains("[ReToken CCR Recovery]"));
+        assert!(text.contains("original secret context"));
+
+        // stop_reason should be updated to end_turn
+        assert_eq!(parsed["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn test_anthropic_missing_handle_unchanged() {
+        let store = CcrStore::open_in_memory().unwrap();
+
+        let response = json!({
+            "id": "msg_01",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01",
+                    "name": "retoken_retrieve",
+                    "input": { "handle": "ccr:missing" }
+                }
+            ],
+            "stop_reason": "tool_use"
+        });
+
+        let resp_bytes = serde_json::to_vec(&response).unwrap();
+        let intercepted = intercept_ccr_tool_calls(&resp_bytes, &store);
+
+        // Missing handle leaves bytes unchanged
+        assert_eq!(intercepted, resp_bytes);
+    }
+
+    #[test]
+    fn test_openai_format_left_unchanged() {
+        let store = CcrStore::open_in_memory().unwrap();
+
+        let response = json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "retoken_retrieve",
+                                    "arguments": "{\"handle\":\"ccr:123\"}"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let resp_bytes = serde_json::to_vec(&response).unwrap();
+        let intercepted = intercept_ccr_tool_calls(&resp_bytes, &store);
+
+        // Unsupported OpenAI format is left unchanged
+        assert_eq!(intercepted, resp_bytes);
     }
 }

@@ -10,51 +10,68 @@ static CODE_BLOCK_RE: LazyLock<Regex> = LazyLock::new(|| {
 // Safely match line comments that are the ONLY thing on the line (ignoring whitespace).
 // This prevents accidental stripping of "http://" inside strings.
 // Ignores doc comments (///, //!) and our own markers (// [ReToken).
-static LINE_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^[ \t]*//(.*)$").unwrap()
-});
+static LINE_COMMENT_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^[ \t]*//(.*)$").unwrap());
 
 // Collapse multiple blank lines into a single blank line
-static MULTI_BLANK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*\n(\s*\n)+").unwrap()
-});
+static MULTI_BLANK_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^\s*\n(\s*\n)+").unwrap());
 
 /// AST-Aware Code Minification (Heuristic-based for safety and zero-latency).
 /// Strips non-essential comments and excessive whitespace from code blocks.
 pub fn minify_code_blocks(text: &str) -> String {
-    CODE_BLOCK_RE.replace_all(text, |caps: &Captures| {
-        let (prefix, mut content, suffix) = if let Some(m) = caps.get(1) {
-            (m.as_str(), caps.get(2).unwrap().as_str().to_string(), caps.get(3).unwrap().as_str())
-        } else {
-            (caps.get(4).unwrap().as_str(), caps.get(5).unwrap().as_str().to_string(), caps.get(6).unwrap().as_str())
-        };
-
-        // Don't minify if it's too small
-        if content.len() < 200 {
-            return caps.get(0).unwrap().as_str().to_string();
-        }
-
-        let orig_len = content.len();
-        
-        // 1. Strip full-line comments (that are not doc comments)
-        content = LINE_COMMENT_RE.replace_all(&content, |caps: &Captures| {
-            let inner = caps.get(1).unwrap().as_str();
-            if inner.starts_with('/') || inner.starts_with('!') || inner.starts_with(" [ReToken") {
-                caps.get(0).unwrap().as_str().to_string()
+    CODE_BLOCK_RE
+        .replace_all(text, |caps: &Captures| {
+            let (prefix, mut content, suffix) = if let Some(m) = caps.get(1) {
+                (
+                    m.as_str(),
+                    caps.get(2).unwrap().as_str().to_string(),
+                    caps.get(3).unwrap().as_str(),
+                )
             } else {
-                "".to_string()
+                (
+                    caps.get(4).unwrap().as_str(),
+                    caps.get(5).unwrap().as_str().to_string(),
+                    caps.get(6).unwrap().as_str(),
+                )
+            };
+
+            // Don't minify if it's too small
+            if content.len() < 200 {
+                return caps.get(0).unwrap().as_str().to_string();
             }
-        }).to_string();
 
-        // 2. Collapse multiple blank lines into a single blank line
-        content = MULTI_BLANK_RE.replace_all(&content, "\n").to_string();
+            let orig_len = content.len();
 
-        if content.len() < orig_len {
-            debug!("Heuristic Minifier: Compressed block from {} to {} bytes", orig_len, content.len());
-        }
+            // 1. Strip full-line comments (that are not doc comments)
+            content = LINE_COMMENT_RE
+                .replace_all(&content, |caps: &Captures| {
+                    let inner = caps.get(1).unwrap().as_str();
+                    if inner.starts_with('/')
+                        || inner.starts_with('!')
+                        || inner.starts_with(" [ReToken")
+                    {
+                        caps.get(0).unwrap().as_str().to_string()
+                    } else {
+                        "".to_string()
+                    }
+                })
+                .to_string();
 
-        format!("{}{}{}", prefix, content, suffix)
-    }).to_string()
+            // 2. Collapse multiple blank lines into a single blank line
+            content = MULTI_BLANK_RE.replace_all(&content, "\n").to_string();
+
+            if content.len() < orig_len {
+                debug!(
+                    "Heuristic Minifier: Compressed block from {} to {} bytes",
+                    orig_len,
+                    content.len()
+                );
+            }
+
+            format!("{}{}{}", prefix, content, suffix)
+        })
+        .to_string()
 }
 
 #[cfg(test)]

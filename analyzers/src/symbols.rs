@@ -34,9 +34,13 @@ impl SymbolExtractor {
     pub fn new() -> Self {
         Self {
             // Very naive regexes for MVP, intended for JS/TS/Rust
-            func_regex: Regex::new(r#"^(?:pub\s+|export\s+|async\s+)*(?:fn|function)\s+([a-zA-Z0-9_]+)"#).unwrap(),
+            func_regex: Regex::new(
+                r#"^(?:pub\s+|export\s+|async\s+)*(?:fn|function)\s+([a-zA-Z0-9_]+)"#,
+            )
+            .unwrap(),
             class_regex: Regex::new(r#"^(?:pub\s+|export\s+)*class\s+([a-zA-Z0-9_]+)"#).unwrap(),
-            import_regex: Regex::new(r#"^(?:import|use)\s+.*(?:from\s+)?['"]([^'"]+)['"]"#).unwrap(),
+            import_regex: Regex::new(r#"^(?:import|use)\s+.*(?:from\s+)?['"]([^'"]+)['"]"#)
+                .unwrap(),
             export_regex: Regex::new(r#"^export\s+.*from\s+['"]([^'"]+)['"]"#).unwrap(),
         }
     }
@@ -51,7 +55,7 @@ impl SymbolExtractor {
         for (i, line) in content.lines().enumerate() {
             let line_num = i + 1;
             let trimmed = line.trim_start();
-            
+
             if let Some(caps) = self.func_regex.captures(trimmed) {
                 symbols.push(Symbol {
                     name: caps[1].to_string(),

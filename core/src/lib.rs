@@ -1,8 +1,8 @@
-pub mod telemetry;
+pub mod cache;
+pub mod config;
 pub mod recorder;
 pub mod state;
-pub mod config;
-pub mod cache;
+pub mod telemetry;
 
 pub fn init() {
     // core initialization

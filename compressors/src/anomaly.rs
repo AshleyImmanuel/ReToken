@@ -1,5 +1,5 @@
-use serde_json::Value;
 use crate::stats::{median_absolute_deviation, percentile};
+use serde_json::Value;
 
 /// Extracts all numeric leaf values from a JSON element, keyed by their JSON path.
 pub fn extract_numeric_leaves(value: &Value, path: &str, out: &mut Vec<(String, f64)>) {

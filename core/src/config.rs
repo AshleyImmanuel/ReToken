@@ -12,7 +12,7 @@ pub struct AppConfig {
     pub max_cache_entries: usize,
     pub terse_mode: bool,
     pub port: u16,
-    
+
     // Dynamic configurations replacing hardcoded logic
     pub persona_prompt: String,
     pub elision_note: String,

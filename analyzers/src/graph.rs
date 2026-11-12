@@ -1,6 +1,6 @@
+use crate::symbols::{SymbolExtractor, SymbolType};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use crate::symbols::{SymbolExtractor, SymbolType};
 
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
@@ -23,10 +23,10 @@ impl DependencyGraph {
 
     pub fn build(paths: Vec<PathBuf>, extractor: &SymbolExtractor) -> Self {
         let mut graph = Self::new();
-        
+
         for path in paths {
             let symbols = extractor.extract(&path);
-            
+
             let mut functions = Vec::new();
             let mut classes = Vec::new();
             let mut imports = Vec::new();
@@ -41,13 +41,16 @@ impl DependencyGraph {
                 }
             }
 
-            graph.files.insert(path.clone(), FileNode {
-                path,
-                functions,
-                classes,
-                imports,
-                exports,
-            });
+            graph.files.insert(
+                path.clone(),
+                FileNode {
+                    path,
+                    functions,
+                    classes,
+                    imports,
+                    exports,
+                },
+            );
         }
 
         graph

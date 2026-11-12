@@ -1,9 +1,9 @@
+use hex;
+use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use ring::digest::{Context, SHA256};
-use hex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StateType {
@@ -34,6 +34,10 @@ pub struct StateObject {
     pub original_content: Option<Vec<u8>>,
 }
 
+/// In-memory state tracking engine.
+///
+/// NOTE: This provides an in-memory scaffolding for tracking objects during a session.
+/// It is not a distributed or persistent multi-tenant persistence layer.
 pub struct StateEngine {
     /// Maps object_id to the most recent version of a StateObject
     objects_by_id: HashMap<String, StateObject>,
@@ -63,10 +67,18 @@ impl StateEngine {
     }
 
     fn current_timestamp() -> u64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 
-    pub fn insert_or_update(&mut self, state_type: StateType, content: &[u8], source: Option<String>) -> StateObject {
+    pub fn insert_or_update(
+        &mut self,
+        state_type: StateType,
+        content: &[u8],
+        source: Option<String>,
+    ) -> StateObject {
         let hash = Self::hash_content(content);
         let size = content.len();
         let now = Self::current_timestamp();

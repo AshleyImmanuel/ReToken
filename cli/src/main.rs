@@ -1,9 +1,9 @@
-use retoken_core::telemetry;
 use clap::{Parser, Subcommand};
+use retoken_core::telemetry;
 
-pub mod wrap;
 pub mod analyze;
 pub mod init;
+pub mod wrap;
 
 #[derive(Parser)]
 #[command(name = "retoken")]
@@ -58,6 +58,6 @@ async fn main() -> anyhow::Result<()> {
             wrap::run_wrap(inject, command).await?;
         }
     }
-    
+
     Ok(())
 }

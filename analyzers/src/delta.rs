@@ -7,13 +7,13 @@ pub fn generate_diff(old_content: &str, new_content: &str, filename: &str) -> St
 
     let mut unified = diff.unified_diff();
     let formatted = unified.context_radius(3).header(filename, filename);
-        
+
     output.push_str(&formatted.to_string());
-    
+
     // Fallback if no lines actually changed but function called
     if output.is_empty() {
         return "No changes detected.".to_string();
     }
-    
+
     output
 }

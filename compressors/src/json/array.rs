@@ -2,8 +2,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use crate::anomaly::detect_anomalies;
-use crate::json::constants::{ELIDED_KEY, ELIDED_NOTE_KEY, ERROR_VALUE_RE};
 use crate::json::config::JsonCompressorConfig;
+use crate::json::constants::{ELIDED_KEY, ELIDED_NOTE_KEY, ERROR_VALUE_RE};
 
 /// Collapses a long array, keeping signal-carrying elements and emitting
 /// elision markers for dropped runs.
@@ -22,7 +22,11 @@ pub fn select_array(arr: &[Value], config: &JsonCompressorConfig, collapsed: &mu
     for item in keep.iter_mut().take(config.keep_first.min(n)) {
         *item = true;
     }
-    for item in keep.iter_mut().take(n).skip(n.saturating_sub(config.keep_last)) {
+    for item in keep
+        .iter_mut()
+        .take(n)
+        .skip(n.saturating_sub(config.keep_last))
+    {
         *item = true;
     }
 

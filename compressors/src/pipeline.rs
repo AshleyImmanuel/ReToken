@@ -2,20 +2,10 @@ use serde_json::Value;
 use tracing::info;
 
 use crate::ccr::CcrStore;
-use crate::inject::{inject_ccr_tool, inject_output_persona};
+use crate::inject::{inject_ccr_tool_for_provider, inject_output_persona_for_provider};
 use crate::process::compress_messages;
 
 /// The full heuristic compression pipeline applied to an LLM API request body.
-///
-/// This orchestrates all compressors in the correct order:
-/// 1. Walk the `messages` array, detecting tool results and large text blocks
-/// 2. Compress log-like content with the log compressor
-/// 3. Compress large JSON arrays with MAD anomaly detection
-/// 4. Store originals in CCR before replacing with compressed versions
-/// 5. Inject the `retoken_retrieve` tool schema if any data was CCR-stored
-/// 6. Inject the output persona (terse mode) system prompt
-///
-/// Returns (modified_body_bytes, compression_stats).
 pub struct CompressionStats {
     pub log_blocks_compressed: usize,
     pub json_arrays_collapsed: usize,
@@ -34,13 +24,15 @@ impl CompressionStats {
     }
 }
 
-/// Runs the full compression pipeline on an API request body.
-pub fn run_pipeline(
+/// Runs the full compression pipeline on an API request body for a specific provider.
+pub fn run_pipeline_for_provider(
     body: &mut Value,
     ccr_store: &CcrStore,
     is_stream: bool,
     persona_prompt: &str,
     elision_note: &str,
+    is_anthropic: bool,
+    recovery_supported: bool,
 ) -> CompressionStats {
     let original_bytes = serde_json::to_vec(body).unwrap_or_default();
     let original_size = original_bytes.len();
@@ -54,17 +46,17 @@ pub fn run_pipeline(
         compressed_size: 0,
     };
 
-    // If the request is streaming, we cannot safely intercept tool calls in the response stream.
-    // Thus, we must disable lossy compression (CCR) for streaming requests.
-    if !is_stream {
+    // If the request is streaming, or if transparent recovery is not supported for this provider,
+    // we MUST NOT perform lossy CCR elisions or inject fictitious retrieval tools.
+    if !is_stream && recovery_supported {
         compress_messages(body, ccr_store, &mut stats, elision_note);
 
         if stats.ccr_entries_stored > 0 {
-            inject_ccr_tool(body);
+            inject_ccr_tool_for_provider(body, is_anthropic);
         }
     }
 
-    inject_output_persona(body, persona_prompt);
+    inject_output_persona_for_provider(body, persona_prompt, is_anthropic);
 
     let compressed_bytes = serde_json::to_vec(body).unwrap_or_default();
     stats.compressed_size = compressed_bytes.len();
@@ -85,9 +77,24 @@ pub fn run_pipeline(
     stats
 }
 
-
-
-
+/// Runs the default compression pipeline (assuming Anthropic format and recovery supported).
+pub fn run_pipeline(
+    body: &mut Value,
+    ccr_store: &CcrStore,
+    is_stream: bool,
+    persona_prompt: &str,
+    elision_note: &str,
+) -> CompressionStats {
+    run_pipeline_for_provider(
+        body,
+        ccr_store,
+        is_stream,
+        persona_prompt,
+        elision_note,
+        true,
+        true,
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -145,11 +152,84 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_skips_ccr_when_recovery_unsupported() {
+        let store = test_store();
+        let big_array: Vec<Value> = (0..200)
+            .map(|i| json!({"file": format!("src/file_{}.rs", i), "size": 1024, "status": "ok"}))
+            .collect();
+
+        let raw_tool_content = serde_json::to_string(&big_array).unwrap();
+        let mut body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "list files"},
+                {"role": "tool", "content": raw_tool_content.clone()}
+            ]
+        });
+
+        // Provider is OpenAI (is_anthropic: false, recovery_supported: false)
+        let stats = run_pipeline_for_provider(
+            &mut body,
+            &store,
+            false,
+            "test persona",
+            "test elision",
+            false,
+            false,
+        );
+
+        assert_eq!(stats.ccr_entries_stored, 0);
+        // Tools array must NOT have been created or injected with fake retrieval tool
+        assert!(body.get("tools").is_none());
+        // Tool content should remain intact
+        let msgs = body.get("messages").unwrap().as_array().unwrap();
+        let tool_msg = msgs.iter().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool")).unwrap();
+        assert_eq!(tool_msg["content"].as_str().unwrap(), raw_tool_content);
+    }
+
+    #[test]
+    fn pipeline_skips_ccr_when_recovery_unsupported() {
+        let store = test_store();
+        let big_array: Vec<Value> = (0..200)
+            .map(|i| json!({"file": format!("src/file_{}.rs", i), "size": 1024, "status": "ok"}))
+            .collect();
+
+        let raw_tool_content = serde_json::to_string(&big_array).unwrap();
+        let mut body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "list files"},
+                {"role": "tool", "content": raw_tool_content.clone()}
+            ]
+        });
+
+        // Provider is OpenAI (is_anthropic: false, recovery_supported: false)
+        let stats = run_pipeline_for_provider(
+            &mut body,
+            &store,
+            false,
+            "test persona",
+            "test elision",
+            false,
+            false,
+        );
+
+        assert_eq!(stats.ccr_entries_stored, 0);
+        // Tools array must NOT have been created or injected with fake retrieval tool
+        assert!(body.get("tools").is_none());
+        // Tool content should remain intact
+        let msgs = body.get("messages").unwrap().as_array().unwrap();
+        let tool_msg = msgs
+            .iter()
+            .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+            .unwrap();
+        assert_eq!(tool_msg["content"].as_str().unwrap(), raw_tool_content);
+    }
+
+    #[test]
     fn pipeline_injects_ccr_tool_when_needed() {
         let store = test_store();
-        let big_array: Vec<Value> = (0..20)
-            .map(|i| json!({"id": i, "val": 42}))
-            .collect();
+        let big_array: Vec<Value> = (0..20).map(|i| json!({"id": i, "val": 42})).collect();
 
         let mut body = json!({
             "model": "claude-sonnet-4-20250514",
@@ -163,9 +243,10 @@ mod tests {
         if stats.ccr_entries_stored > 0 {
             let tools = body.get("tools").and_then(|t| t.as_array());
             assert!(tools.is_some());
-            let has_retrieve = tools.unwrap().iter().any(|t| {
-                t.get("name").and_then(|n| n.as_str()) == Some("retoken_retrieve")
-            });
+            let has_retrieve = tools
+                .unwrap()
+                .iter()
+                .any(|t| t.get("name").and_then(|n| n.as_str()) == Some("retoken_retrieve"));
             assert!(has_retrieve);
         }
     }
@@ -180,7 +261,15 @@ mod tests {
             ]
         });
 
-        run_pipeline(&mut body, &store, false, "test persona", "test elision");
+        run_pipeline_for_provider(
+            &mut body,
+            &store,
+            false,
+            "test persona",
+            "test elision",
+            false,
+            false,
+        );
 
         let messages = body.get("messages").unwrap().as_array().unwrap();
         let has_persona = messages.iter().any(|m| {

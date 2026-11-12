@@ -35,7 +35,10 @@ pub fn decode(encoded: &str) -> Vec<u8> {
             _ => 0,
         }
     }
-    let bytes: Vec<u8> = encoded.bytes().filter(|&b| b != b'=' && b != b'\n' && b != b'\r').collect();
+    let bytes: Vec<u8> = encoded
+        .bytes()
+        .filter(|&b| b != b'=' && b != b'\n' && b != b'\r')
+        .collect();
     let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
     for chunk in bytes.chunks(4) {
         if chunk.len() < 2 {
@@ -43,8 +46,16 @@ pub fn decode(encoded: &str) -> Vec<u8> {
         }
         let b0 = char_val(chunk[0]) as u32;
         let b1 = char_val(chunk[1]) as u32;
-        let b2 = if chunk.len() > 2 { char_val(chunk[2]) as u32 } else { 0 };
-        let b3 = if chunk.len() > 3 { char_val(chunk[3]) as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 {
+            char_val(chunk[2]) as u32
+        } else {
+            0
+        };
+        let b3 = if chunk.len() > 3 {
+            char_val(chunk[3]) as u32
+        } else {
+            0
+        };
         let n = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
         result.push((n >> 16) as u8);
         if chunk.len() > 2 {
