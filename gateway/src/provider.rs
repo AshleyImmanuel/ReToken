@@ -404,6 +404,7 @@ pub struct TokenUsage {
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,
     pub cached_tokens: Option<usize>,
+    pub reasoning_tokens: Option<usize>,
 }
 
 pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUsage {
@@ -411,6 +412,7 @@ pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUs
         input_tokens: None,
         output_tokens: None,
         cached_tokens: None,
+        reasoning_tokens: None,
     };
 
     let json: serde_json::Value = match serde_json::from_slice(response_body) {
@@ -450,6 +452,11 @@ pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUs
             usage.cached_tokens = usage_obj
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            usage.reasoning_tokens = usage_obj
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
         }
@@ -644,5 +651,28 @@ mod tests {
         assert!(!is_sensitive_header("Content-Type"));
         assert!(!is_sensitive_header("Accept"));
         assert!(!is_sensitive_header("User-Agent"));
+    }
+    #[test]
+    fn test_extract_token_usage_openai_reasoning_tokens() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-123",
+            "usage": {
+                "prompt_tokens": 1500,
+                "completion_tokens": 800,
+                "total_tokens": 2300,
+                "prompt_tokens_details": {
+                    "cached_tokens": 1024
+                },
+                "completion_tokens_details": {
+                    "reasoning_tokens": 600
+                }
+            }
+        });
+        let body = serde_json::to_vec(&response).unwrap();
+        let usage = extract_token_usage(&Provider::OpenAI, &body);
+        assert_eq!(usage.input_tokens, Some(1500));
+        assert_eq!(usage.output_tokens, Some(800));
+        assert_eq!(usage.cached_tokens, Some(1024));
+        assert_eq!(usage.reasoning_tokens, Some(600));
     }
 }

@@ -76,6 +76,10 @@ pub async fn run_stats() -> anyhow::Result<()> {
                     .get("total_cached_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                let reasoning_tokens = json
+                    .get("total_reasoning_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
 
                 let hits = json.get("total_hits").and_then(|v| v.as_u64()).unwrap_or(0);
                 let misses = json
@@ -118,6 +122,12 @@ pub async fn run_stats() -> anyhow::Result<()> {
                 println!("    Input Tokens Processed: {}", in_tokens);
                 println!("    Output Tokens Generated: {}", out_tokens);
                 println!("    Cached Tokens Saved: {}", cached_tokens);
+                if reasoning_tokens > 0 {
+                    println!(
+                        "    Reasoning Tokens (o1/o3/thinking): {}",
+                        reasoning_tokens
+                    );
+                }
                 println!("  Response Cache:");
                 println!("    Active Entries: {} / {}", cached, max_cached);
                 println!("    Cache Hits: {}", hits);

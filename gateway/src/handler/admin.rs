@@ -109,6 +109,7 @@ pub async fn admin_stats(
             "total_input_tokens": tel.total_input_tokens,
             "total_output_tokens": tel.total_output_tokens,
             "total_cached_tokens": tel.total_cached_tokens,
+            "total_reasoning_tokens": tel.total_reasoning_tokens,
         })),
     )
 }

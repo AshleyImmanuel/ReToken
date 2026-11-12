@@ -11,6 +11,7 @@ pub struct FlightRecord {
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,
     pub cached_tokens: Option<usize>,
+    pub reasoning_tokens: Option<usize>,
     pub network_duration_ms: u64,
     pub cache_hits: usize,
     pub cache_misses: usize,
@@ -32,6 +33,7 @@ impl Default for FlightRecord {
             input_tokens: None,
             output_tokens: None,
             cached_tokens: None,
+            reasoning_tokens: None,
             network_duration_ms: 0,
             cache_hits: 0,
             cache_misses: 0,
@@ -52,6 +54,7 @@ pub struct FlightTelemetry {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cached_tokens: u64,
+    pub total_reasoning_tokens: u64,
     pub total_cache_hits: u64,
     pub total_cache_misses: u64,
 }
@@ -73,6 +76,9 @@ impl FlightTelemetry {
         }
         if let Some(tokens) = record.cached_tokens {
             self.total_cached_tokens += tokens as u64;
+        }
+        if let Some(tokens) = record.reasoning_tokens {
+            self.total_reasoning_tokens += tokens as u64;
         }
         self.total_cache_hits += record.cache_hits as u64;
         self.total_cache_misses += record.cache_misses as u64;

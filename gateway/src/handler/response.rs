@@ -117,6 +117,7 @@ pub async fn process_response(
     record.input_tokens = usage.input_tokens;
     record.output_tokens = usage.output_tokens;
     record.cached_tokens = usage.cached_tokens;
+    record.reasoning_tokens = usage.reasoning_tokens;
     record.final_success = Some(status.is_success());
 
     info!("Flight Record: {:?}", record);
