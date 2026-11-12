@@ -43,13 +43,14 @@ impl ResponseCache {
         }
     }
 
-    /// Compute a cache key including full request context (SHA256 hex digest).
+    /// Compute a cache key including full request context and credential isolation (SHA256 hex digest).
     pub fn cache_key_with_context(
         method: &str,
         path: &str,
         provider: &str,
         request_body: &[u8],
         context_hash: Option<&str>,
+        auth_fingerprint: Option<&str>,
     ) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
@@ -61,16 +62,29 @@ impl ResponseCache {
         hasher.update(b":");
         hasher.update(request_body);
         if let Some(hash) = context_hash {
-            hasher.update(b"||");
+            hasher.update(b"||repo:");
             hasher.update(hash.as_bytes());
         }
+        if let Some(auth) = auth_fingerprint {
+            hasher.update(b"||auth:");
+            hasher.update(auth.as_bytes());
+        }
+        let result = hasher.finalize();
+        result.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    /// Compute a SHA256 hex digest fingerprint for an authentication credential.
+    pub fn hash_credential(credential: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(credential.as_bytes());
         let result = hasher.finalize();
         result.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
     /// Legacy / simple cache key computation from request body and optional context hash.
     pub fn cache_key(request_body: &[u8], context_hash: Option<&str>) -> String {
-        Self::cache_key_with_context("", "", "", request_body, context_hash)
+        Self::cache_key_with_context("", "", "", request_body, context_hash, None)
     }
 
     /// Look up a cache entry by key. Returns `None` if not found or expired.
@@ -168,28 +182,63 @@ mod tests {
     #[test]
     fn test_cache_key_context_differentiation() {
         let body = b"{\"model\": \"test\"}";
-        let k1 =
-            ResponseCache::cache_key_with_context("POST", "/v1/messages", "anthropic", body, None);
+        let k1 = ResponseCache::cache_key_with_context(
+            "POST",
+            "/v1/messages",
+            "anthropic",
+            body,
+            None,
+            None,
+        );
         let k2 = ResponseCache::cache_key_with_context(
             "POST",
             "/v1/chat/completions",
             "openai",
             body,
             None,
+            None,
         );
-        let k3 =
-            ResponseCache::cache_key_with_context("GET", "/v1/messages", "anthropic", body, None);
+        let k3 = ResponseCache::cache_key_with_context(
+            "GET",
+            "/v1/messages",
+            "anthropic",
+            body,
+            None,
+            None,
+        );
         let k4 = ResponseCache::cache_key_with_context(
             "POST",
             "/v1/messages",
             "anthropic",
             body,
             Some("repo1"),
+            None,
+        );
+        let k5 = ResponseCache::cache_key_with_context(
+            "POST",
+            "/v1/messages",
+            "anthropic",
+            body,
+            None,
+            Some("user1_auth_hash"),
+        );
+        let k6 = ResponseCache::cache_key_with_context(
+            "POST",
+            "/v1/messages",
+            "anthropic",
+            body,
+            None,
+            Some("user2_auth_hash"),
         );
 
         assert_ne!(k1, k2, "different paths/providers must not collide");
         assert_ne!(k1, k3, "different methods must not collide");
         assert_ne!(k1, k4, "different context hashes must not collide");
+        assert_ne!(
+            k1, k5,
+            "credentialed requests must not collide with uncredentialed"
+        );
+        assert_ne!(k5, k6, "different user credentials must isolate cache keys");
     }
 
     #[test]

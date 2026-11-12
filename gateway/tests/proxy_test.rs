@@ -130,6 +130,7 @@ fn create_test_gateway(upstream_base: &str) -> Router {
     config.openai_base_url = upstream_base.to_string();
     config.cache_enabled = true;
     config.terse_mode = true;
+    config.allow_private_upstreams = true; // allow mock upstream on 127.0.0.1 in tests
 
     gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store)
 }
@@ -340,4 +341,141 @@ async fn test_bypass_mode_header_preservation() {
         "preserved"
     );
     assert_eq!(count.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_ssrf_protection_blocks_private_and_metadata_ips() {
+    let (upstream_url, _) = start_mock_upstream().await;
+    // Create gateway with strict SSRF policy (allow_private_upstreams = false)
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url.clone();
+    config.allow_private_upstreams = false; // strict default
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    // 1. Loopback IP rejected
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-retoken-upstream-url", "http://127.0.0.1:8080")
+        .body(Body::from(b"{}".to_vec()))
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), 400);
+
+    // 2. Localhost host rejected
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-retoken-upstream-url", "http://localhost:3000")
+        .body(Body::from(b"{}".to_vec()))
+        .unwrap();
+    let resp2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), 400);
+
+    // 3. Cloud metadata service link-local IP rejected
+    let req3 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header(
+            "x-retoken-upstream-url",
+            "http://169.254.169.254/latest/meta-data/",
+        )
+        .body(Body::from(b"{}".to_vec()))
+        .unwrap();
+    let resp3 = app.oneshot(req3).await.unwrap();
+    assert_eq!(resp3.status(), 400);
+}
+
+#[tokio::test]
+async fn test_request_body_size_limit_rejection() {
+    let (upstream_url, _) = start_mock_upstream().await;
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.max_request_body_bytes = 100; // tiny 100-byte limit
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    // Oversized body (500 bytes > 100 limit)
+    let oversized = vec![b'a'; 500];
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(oversized))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 413); // 413 Payload Too Large
+}
+
+#[tokio::test]
+async fn test_cache_credential_isolation_and_no_cache_opt_out() {
+    let (upstream_url, count) = start_mock_upstream().await;
+    let app = create_test_gateway(&upstream_url);
+
+    let req_body = serde_json::json!({
+        "model": "claude-3-opus",
+        "messages": [
+            {"role": "user", "content": "Credential isolation test"}
+        ]
+    });
+    let payload = serde_json::to_vec(&req_body).unwrap();
+
+    // Request 1 from User A -> Cache Miss
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-api-key", "user-A-key")
+        .body(Body::from(payload.clone()))
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), 200);
+    assert_eq!(resp1.headers().get("x-retoken-cache").unwrap(), "miss");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+
+    // Duplicate Request 2 from User A -> Cache Hit
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-api-key", "user-A-key")
+        .body(Body::from(payload.clone()))
+        .unwrap();
+    let resp2 = app.clone().oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), 200);
+    assert_eq!(resp2.headers().get("x-retoken-cache").unwrap(), "hit");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+
+    // Request 3 with identical body from User B -> Cache MISS (strictly isolated by credential)
+    let req3 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-api-key", "user-B-key")
+        .body(Body::from(payload.clone()))
+        .unwrap();
+    let resp3 = app.clone().oneshot(req3).await.unwrap();
+    assert_eq!(resp3.status(), 200);
+    assert_eq!(resp3.headers().get("x-retoken-cache").unwrap(), "miss");
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+
+    // Request 4 from User A with cache-control: no-cache -> Cache MISS (explicit opt-out)
+    let req4 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-api-key", "user-A-key")
+        .header("cache-control", "no-cache")
+        .body(Body::from(payload))
+        .unwrap();
+    let resp4 = app.oneshot(req4).await.unwrap();
+    assert_eq!(resp4.status(), 200);
+    assert_eq!(resp4.headers().get("x-retoken-cache").unwrap(), "miss");
+    assert_eq!(count.load(Ordering::SeqCst), 3);
 }

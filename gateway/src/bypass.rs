@@ -21,7 +21,7 @@ pub async fn forward_raw(
         .map(|(n, v)| (n.to_string(), v.to_str().unwrap_or("").to_string()))
         .collect();
 
-    let provider = detect_provider(path_and_query, &headers)
+    let provider = detect_provider(path_and_query, &headers, config.allow_private_upstreams)
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
     let target_url = build_target_url(provider.base_url(config), path_and_query, &provider)

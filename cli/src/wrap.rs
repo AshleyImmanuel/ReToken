@@ -1,9 +1,9 @@
+use anyhow::Context;
 use retoken_core::config::AppConfig;
 
 pub async fn run_wrap(inject: Vec<String>, command: Vec<String>) -> anyhow::Result<()> {
     if command.is_empty() {
-        eprintln!("Error: wrap requires a command to execute (e.g., `retoken wrap claude`)");
-        std::process::exit(1);
+        anyhow::bail!("wrap requires a command to execute (e.g. `retoken wrap claude`)");
     }
 
     let config = AppConfig::default();
@@ -15,7 +15,8 @@ pub async fn run_wrap(inject: Vec<String>, command: Vec<String>) -> anyhow::Resu
             "Gateway not running on {}. Spawning background proxy...",
             proxy_addr
         );
-        let current_exe = std::env::current_exe().unwrap();
+        let current_exe =
+            std::env::current_exe().context("Failed to determine current executable path")?;
         let mut daemon_cmd = std::process::Command::new(current_exe);
         daemon_cmd
             .arg("run")
@@ -29,16 +30,25 @@ pub async fn run_wrap(inject: Vec<String>, command: Vec<String>) -> anyhow::Resu
         }
 
         #[allow(clippy::zombie_processes)]
-        let _ = daemon_cmd
-            .spawn()
-            .expect("Failed to spawn background proxy");
+        let _ = daemon_cmd.spawn().with_context(|| {
+            format!("Failed to spawn background proxy daemon on {}", proxy_addr)
+        })?;
 
-        // Wait for proxy to bind
-        for _ in 0..20 {
+        // Wait for proxy to bind and verify readiness
+        let mut ready = false;
+        for _ in 0..30 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             if std::net::TcpStream::connect(&proxy_addr).is_ok() {
+                ready = true;
                 break;
             }
+        }
+
+        if !ready {
+            anyhow::bail!(
+                "Background proxy failed to start and bind on {} within 3 seconds. Check logs or start the gateway manually with `retoken run`.",
+                proxy_addr
+            );
         }
     }
 
@@ -62,8 +72,16 @@ pub async fn run_wrap(inject: Vec<String>, command: Vec<String>) -> anyhow::Resu
         cmd.env(var, &proxy_url);
     }
 
-    let mut child = cmd.spawn().expect("Failed to spawn wrapped command");
+    let mut child = cmd.spawn().with_context(|| {
+        format!(
+            "Failed to spawn wrapped command '{}'. Verify that the command is installed and available in your PATH.",
+            command[0]
+        )
+    })?;
 
-    let status = child.wait().await.expect("Failed to wait on child process");
+    let status = child
+        .wait()
+        .await
+        .context("Failed while waiting on wrapped child process")?;
     std::process::exit(status.code().unwrap_or(1));
 }

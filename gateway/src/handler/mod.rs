@@ -62,7 +62,11 @@ pub async fn handler(
         .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_string()))
         .collect();
 
-    let detected_provider = match detect_provider(path_and_query, &req_headers) {
+    let detected_provider = match detect_provider(
+        path_and_query,
+        &req_headers,
+        state.config.allow_private_upstreams,
+    ) {
         Ok(p) => p,
         Err(err) => {
             warn!("Provider detection error: {}", err);
@@ -110,9 +114,17 @@ pub async fn handler(
         }
     }
 
-    let bytes = axum::body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+    let max_bytes = state.config.max_request_body_bytes;
+    let bytes = match axum::body::to_bytes(body, max_bytes).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                "Request body exceeded max limit of {} bytes: {}",
+                max_bytes, e
+            );
+            return Err(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        }
+    };
 
     record.request_size = bytes.len();
     let original_size = bytes.len();
@@ -152,14 +164,33 @@ pub async fn handler(
         .find(|(n, _)| n.eq_ignore_ascii_case("x-retoken-repo-hash"))
         .map(|(_, v)| v.as_str());
 
-    // Exact Cache Lookup (NEVER check or return cache for streaming requests)
-    if state.config.cache_enabled && !is_stream {
+    // Extract auth fingerprint for strict credential isolation
+    let auth_fingerprint = req_headers
+        .iter()
+        .find(|(n, _)| {
+            n.eq_ignore_ascii_case("authorization") || n.eq_ignore_ascii_case("x-api-key")
+        })
+        .map(|(_, v)| ResponseCache::hash_credential(v));
+
+    // Check for cache opt-out / no-cache directives
+    let no_cache = req_headers.iter().any(|(n, v)| {
+        (n.eq_ignore_ascii_case("cache-control")
+            && (v.contains("no-cache") || v.contains("no-store")))
+            || (n.eq_ignore_ascii_case("pragma") && v.contains("no-cache"))
+            || (n.eq_ignore_ascii_case("x-retoken-cache")
+                && (v == "false" || v == "0" || v == "off"))
+            || (n.eq_ignore_ascii_case("x-retoken-no-cache") && (v == "true" || v == "1"))
+    });
+
+    // Exact Cache Lookup (NEVER check or return cache for streaming or no-cache requests)
+    if state.config.cache_enabled && !is_stream && !no_cache {
         let cache_key = ResponseCache::cache_key_with_context(
             method.as_str(),
             path_and_query,
             detected_provider.name(),
             &final_bytes,
             repo_hash,
+            auth_fingerprint.as_deref(),
         );
         let mut cache = state.response_cache.lock().await;
 
@@ -213,9 +244,11 @@ pub async fn handler(
         &mut record,
         &state.ccr_store,
         state.config.cache_enabled,
+        no_cache,
         &state.response_cache,
         &final_bytes,
         repo_hash,
+        auth_fingerprint.as_deref(),
     )
     .await
 }

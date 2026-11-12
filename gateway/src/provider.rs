@@ -28,9 +28,35 @@ impl Provider {
     }
 }
 
-/// Validates a custom upstream URL from untrusted headers.
+/// Returns true if the host is a loopback, link-local, or private network address.
+pub fn is_private_or_loopback_host(host: &str) -> bool {
+    let clean = host.trim().trim_start_matches('[').trim_end_matches(']');
+    if clean.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(ip) = clean.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(ipv4) => {
+                ipv4.is_loopback()            // 127.0.0.0/8
+                    || ipv4.is_private()      // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                    || ipv4.is_link_local()   // 169.254.0.0/16 (e.g. AWS/GCP metadata)
+                    || ipv4.is_broadcast()    // 255.255.255.255
+                    || ipv4.is_unspecified() // 0.0.0.0
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                ipv6.is_loopback()            // ::1
+                    || ipv6.is_unspecified() // ::
+            }
+        }
+    } else {
+        false
+    }
+}
+
+/// Validates a custom upstream URL from untrusted headers with an explicit SSRF trust policy.
 /// Only valid HTTP and HTTPS URLs with a non-empty host are accepted.
-pub fn validate_upstream_url(url_str: &str) -> Result<String, String> {
+/// Unless `allow_private` is true, loopback, link-local, and private addresses are rejected.
+pub fn validate_upstream_url(url_str: &str, allow_private: bool) -> Result<String, String> {
     let trimmed = url_str.trim();
     if trimmed.is_empty() {
         return Err("Custom upstream URL is empty".to_string());
@@ -49,8 +75,16 @@ pub fn validate_upstream_url(url_str: &str) -> Result<String, String> {
         }
     }
 
-    if parsed.host_str().is_none() || parsed.host_str().unwrap().is_empty() {
-        return Err("Upstream URL must include a non-empty host".to_string());
+    let host = match parsed.host_str() {
+        Some(h) if !h.is_empty() => h,
+        _ => return Err("Upstream URL must include a non-empty host".to_string()),
+    };
+
+    if !allow_private && is_private_or_loopback_host(host) {
+        return Err(format!(
+            "Upstream host '{}' targets a loopback, local, or private address (disallowed by SSRF protection policy). Set RETOKEN_ALLOW_PRIVATE_UPSTREAMS=true if intended.",
+            host
+        ));
     }
 
     let mut clean = parsed.to_string();
@@ -69,7 +103,11 @@ pub fn validate_upstream_url(url_str: &str) -> Result<String, String> {
 ///   4. If `x-api-key` header present -> Anthropic
 ///   5. If `Authorization: Bearer` header present -> OpenAI
 ///   6. Fallback to Anthropic
-pub fn detect_provider(path: &str, headers: &[(String, String)]) -> Result<Provider, String> {
+pub fn detect_provider(
+    path: &str,
+    headers: &[(String, String)],
+    allow_private_upstreams: bool,
+) -> Result<Provider, String> {
     // 1. Generic provider via explicit upstream URL
     let mut upstream_url = None;
     let mut provider_name = "generic".to_string();
@@ -84,7 +122,7 @@ pub fn detect_provider(path: &str, headers: &[(String, String)]) -> Result<Provi
     }
 
     if let Some(url) = upstream_url {
-        let clean_url = validate_upstream_url(&url)?;
+        let clean_url = validate_upstream_url(&url, allow_private_upstreams)?;
         return Ok(Provider::Generic {
             name: provider_name,
             base_url: clean_url,
@@ -297,19 +335,29 @@ mod tests {
 
     #[test]
     fn test_validate_upstream_url() {
-        assert!(validate_upstream_url("https://api.groq.com/openai/v1").is_ok());
-        assert!(validate_upstream_url("http://127.0.0.1:11434").is_ok());
+        assert!(validate_upstream_url("https://api.groq.com/openai/v1", false).is_ok());
         assert_eq!(
-            validate_upstream_url("https://example.com/api/").unwrap(),
+            validate_upstream_url("https://example.com/api/", false).unwrap(),
             "https://example.com/api"
         );
 
         // Disallow dangerous or malformed schemes
-        assert!(validate_upstream_url("file:///etc/passwd").is_err());
-        assert!(validate_upstream_url("ftp://server/path").is_err());
-        assert!(validate_upstream_url("javascript:alert(1)").is_err());
-        assert!(validate_upstream_url("").is_err());
-        assert!(validate_upstream_url("not a url").is_err());
+        assert!(validate_upstream_url("file:///etc/passwd", false).is_err());
+        assert!(validate_upstream_url("ftp://server/path", false).is_err());
+        assert!(validate_upstream_url("javascript:alert(1)", false).is_err());
+        assert!(validate_upstream_url("", false).is_err());
+        assert!(validate_upstream_url("not a url", false).is_err());
+
+        // SSRF protection: loopback and private IPs rejected when allow_private=false
+        assert!(validate_upstream_url("http://127.0.0.1:11434", false).is_err());
+        assert!(validate_upstream_url("http://localhost:3000", false).is_err());
+        assert!(validate_upstream_url("http://169.254.169.254/latest", false).is_err());
+        assert!(validate_upstream_url("http://10.0.0.1/api", false).is_err());
+        assert!(validate_upstream_url("http://192.168.1.1/api", false).is_err());
+
+        // Allowed when allow_private=true
+        assert!(validate_upstream_url("http://127.0.0.1:11434", true).is_ok());
+        assert!(validate_upstream_url("http://localhost:3000", true).is_ok());
     }
 
     #[test]
@@ -317,21 +365,21 @@ mod tests {
         let empty_headers = vec![];
 
         // Anthropic path
-        let p = detect_provider("/v1/messages", &empty_headers).unwrap();
+        let p = detect_provider("/v1/messages", &empty_headers, false).unwrap();
         assert_eq!(p, Provider::Anthropic);
 
         // OpenAI path
-        let p = detect_provider("/v1/chat/completions", &empty_headers).unwrap();
+        let p = detect_provider("/v1/chat/completions", &empty_headers, false).unwrap();
         assert_eq!(p, Provider::OpenAI);
 
         // Anthropic header
         let anthropic_headers = vec![("x-api-key".into(), "secret".into())];
-        let p = detect_provider("/custom", &anthropic_headers).unwrap();
+        let p = detect_provider("/custom", &anthropic_headers, false).unwrap();
         assert_eq!(p, Provider::Anthropic);
 
         // OpenAI header
         let openai_headers = vec![("authorization".into(), "Bearer sk-12345".into())];
-        let p = detect_provider("/custom", &openai_headers).unwrap();
+        let p = detect_provider("/custom", &openai_headers, false).unwrap();
         assert_eq!(p, Provider::OpenAI);
 
         // Generic upstream URL
@@ -342,7 +390,7 @@ mod tests {
             ),
             ("x-retoken-provider-name".into(), "together".into()),
         ];
-        let p = detect_provider("/v1/chat/completions", &generic_headers).unwrap();
+        let p = detect_provider("/v1/chat/completions", &generic_headers, false).unwrap();
         assert_eq!(
             p,
             Provider::Generic {

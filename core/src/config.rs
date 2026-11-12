@@ -13,6 +13,11 @@ pub struct AppConfig {
     pub terse_mode: bool,
     pub port: u16,
 
+    /// Maximum request body size in bytes before returning 413 Payload Too Large (default: 10MB).
+    pub max_request_body_bytes: usize,
+    /// Whether custom upstream URLs are allowed to target loopback, private, or local network hosts (default: false).
+    pub allow_private_upstreams: bool,
+
     // Dynamic configurations replacing hardcoded logic
     pub persona_prompt: String,
     pub elision_note: String,
@@ -36,6 +41,14 @@ impl Default for AppConfig {
             max_cache_entries: std::env::var("RETOKEN_MAX_CACHE_ENTRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(1024),
             terse_mode: std::env::var("RETOKEN_TERSE_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(true),
             port: std::env::var("RETOKEN_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8888),
+            max_request_body_bytes: std::env::var("RETOKEN_MAX_REQUEST_BODY_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10 * 1024 * 1024),
+            allow_private_upstreams: std::env::var("RETOKEN_ALLOW_PRIVATE_UPSTREAMS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
             persona_prompt: std::env::var("RETOKEN_PERSONA_PROMPT").unwrap_or_else(|_| "[ReToken Terse Mode Active (Inspired by Caveman). Extreme brevity. Zero pleasantries. Provide only raw technical data, code, or direct answers. Omit explanations. If data is elided with <<handle>>, use retoken_retrieve to fetch it instead of guessing.]".to_string()),
             elision_note: std::env::var("RETOKEN_ELISION_NOTE").unwrap_or_else(|_| "Elements elided by ReToken. Original recoverable via retoken_retrieve tool.".to_string()),
             anthropic_base_url: std::env::var("RETOKEN_ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string()),

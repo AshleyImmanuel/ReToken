@@ -22,9 +22,11 @@ pub async fn process_response(
     record: &mut FlightRecord,
     ccr_store: &Arc<CcrStore>,
     cache_enabled: bool,
+    no_cache: bool,
     response_cache: &Arc<Mutex<ResponseCache>>,
     final_bytes: &[u8],
     repo_hash: Option<&str>,
+    auth_fingerprint: Option<&str>,
 ) -> Result<Response<Body>, axum::http::StatusCode> {
     // Native Streaming Bypass: preserve protocol, do not buffer, do not cache
     if is_stream {
@@ -66,14 +68,15 @@ pub async fn process_response(
 
     info!("Flight Record: {:?}", record);
 
-    // Cache on Miss: Only cache non-streaming, successful 2xx responses
-    if cache_enabled && status.is_success() && !is_stream {
+    // Cache on Miss: Only cache non-streaming, successful 2xx responses when caching is not bypassed
+    if cache_enabled && !no_cache && status.is_success() && !is_stream {
         let cache_key = ResponseCache::cache_key_with_context(
             method,
             path_and_query,
             detected_provider.name(),
             final_bytes,
             repo_hash,
+            auth_fingerprint,
         );
         let mut cache = response_cache.lock().await;
         cache.insert(
