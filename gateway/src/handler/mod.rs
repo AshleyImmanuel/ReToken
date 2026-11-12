@@ -48,8 +48,13 @@ pub async fn handler(
     let uri = req.uri().clone();
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
-    // Bypass mode
-    if req.headers().get("x-retoken-bypass").is_some() {
+    // Bypass mode: active when x-retoken-bypass header is present and not explicitly false/off
+    if req
+        .headers()
+        .get("x-retoken-bypass")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v != "false" && v != "0" && v != "off")
+    {
         info!("Bypass mode: forwarding raw request");
         return forward_raw(&state.client, method, path_and_query, req, &state.config).await;
     }
@@ -356,85 +361,171 @@ pub async fn handler(
         && detected_provider == Provider::Anthropic
         && status.is_success()
     {
+        // Validate Content-Length if present before buffering
+        if let Some((_, len_str)) = resp_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        {
+            if let Ok(content_len) = len_str.parse::<usize>() {
+                if content_len > state.config.max_response_body_bytes {
+                    warn!(
+                        "Upstream CCR response Content-Length {} exceeds limit of {} bytes",
+                        content_len, state.config.max_response_body_bytes
+                    );
+                    record.errors = 1;
+                    let tel = state.telemetry.clone();
+                    let rec = record.clone();
+                    tokio::spawn(async move {
+                        tel.lock().await.record(&rec);
+                    });
+                    return Err(axum::http::StatusCode::BAD_GATEWAY);
+                }
+            }
+        }
+
         let mut initial_body = Vec::new();
         let mut resp_stream = resp;
-        let mut stream_err = false;
-        while let Some(chunk_res) = resp_stream.chunk().await.ok().flatten() {
+        while let Some(chunk_res) = resp_stream.chunk().await.map_err(|e| {
+            warn!("Upstream response read error during CCR processing: {}", e);
+            record.errors = 1;
+            let tel = state.telemetry.clone();
+            let rec = record.clone();
+            tokio::spawn(async move {
+                tel.lock().await.record(&rec);
+            });
+            axum::http::StatusCode::BAD_GATEWAY
+        })? {
             if initial_body.len() + chunk_res.len() > state.config.max_response_body_bytes {
-                stream_err = true;
-                break;
+                warn!(
+                    "Upstream response body exceeded limit of {} bytes during CCR processing",
+                    state.config.max_response_body_bytes
+                );
+                record.errors = 1;
+                let tel = state.telemetry.clone();
+                let rec = record.clone();
+                tokio::spawn(async move {
+                    tel.lock().await.record(&rec);
+                });
+                return Err(axum::http::StatusCode::BAD_GATEWAY);
             }
             initial_body.extend_from_slice(&chunk_res);
         }
 
-        if !stream_err {
-            if let Ok(resp_json) = serde_json::from_slice::<serde_json::Value>(&initial_body) {
-                let calls = crate::interceptor::find_ccr_tool_calls(&resp_json);
-                if !calls.is_empty() && json_body.is_some() {
-                    let mut req_body_val = json_body.clone().unwrap();
-                    let (assistant_msg, tool_result_msg) =
-                        crate::interceptor::build_ccr_tool_result_messages(
-                            &resp_json["content"],
-                            &calls,
-                            &state.ccr_store,
-                        );
-
-                    if let Some(messages) = req_body_val
-                        .get_mut("messages")
-                        .and_then(|m| m.as_array_mut())
-                    {
-                        messages.push(assistant_msg);
-                        messages.push(tool_result_msg);
-                    }
-
-                    let mut follow_up_builder = client_to_use.post(target_url.clone());
-                    for (name, val) in &req_headers {
-                        if !is_hop_by_hop_header(name)
-                            && !name.eq_ignore_ascii_case("content-length")
-                        {
-                            follow_up_builder = follow_up_builder.header(name, val);
-                        }
-                    }
-                    let follow_up_bytes = serde_json::to_vec(&req_body_val).unwrap_or_default();
-                    follow_up_builder = follow_up_builder.body(follow_up_bytes);
-
-                    info!(
-                        "CCR: Model requested {} handle(s). Executing multi-turn follow-up request to upstream provider...",
-                        calls.len()
+        if let Ok(resp_json) = serde_json::from_slice::<serde_json::Value>(&initial_body) {
+            let calls = crate::interceptor::find_ccr_tool_calls(&resp_json);
+            if !calls.is_empty() && json_body.is_some() {
+                let mut req_body_val = json_body.clone().unwrap();
+                let (assistant_msg, tool_result_msg) =
+                    crate::interceptor::build_ccr_tool_result_messages(
+                        &resp_json["content"],
+                        &calls,
+                        &state.ccr_store,
                     );
 
-                    match follow_up_builder.send().await {
-                        Ok(follow_up_resp) => {
-                            status = follow_up_resp.status();
-                            resp_headers = follow_up_resp
-                                .headers()
-                                .iter()
-                                .filter_map(|(name, value)| {
-                                    value
-                                        .to_str()
-                                        .ok()
-                                        .map(|v| (name.to_string(), v.to_string()))
-                                })
-                                .collect();
-                            let mut follow_up_body = Vec::new();
-                            let mut fu_stream = follow_up_resp;
-                            while let Some(chunk) = fu_stream.chunk().await.ok().flatten() {
-                                if follow_up_body.len() + chunk.len()
-                                    > state.config.max_response_body_bytes
-                                {
-                                    break;
-                                }
-                                follow_up_body.extend_from_slice(&chunk);
-                            }
-                            (None, Some(follow_up_body))
-                        }
-                        Err(e) => {
-                            warn!("CCR follow-up request failed: {}", e);
-                            (None, Some(initial_body))
-                        }
+                if let Some(messages) = req_body_val
+                    .get_mut("messages")
+                    .and_then(|m| m.as_array_mut())
+                {
+                    messages.push(assistant_msg);
+                    messages.push(tool_result_msg);
+                }
+
+                let mut follow_up_builder = client_to_use.post(target_url.clone());
+                for (name, val) in &req_headers {
+                    let name_lower = name.to_lowercase();
+                    if !is_hop_by_hop_header(&name_lower)
+                        && name_lower != "content-length"
+                        && name_lower != "host"
+                        && !is_internal_header(&name_lower)
+                    {
+                        follow_up_builder = follow_up_builder.header(name, val);
                     }
-                } else {
-                    (None, Some(initial_body))
+                }
+                let follow_up_bytes = serde_json::to_vec(&req_body_val).unwrap_or_default();
+                follow_up_builder = follow_up_builder.body(follow_up_bytes);
+
+                info!(
+                    "CCR: Model requested {} handle(s). Executing multi-turn follow-up request to upstream provider...",
+                    calls.len()
+                );
+
+                match follow_up_builder.send().await {
+                    Ok(follow_up_resp) => {
+                        status = follow_up_resp.status();
+                        resp_headers = follow_up_resp
+                            .headers()
+                            .iter()
+                            .filter_map(|(name, value)| {
+                                value
+                                    .to_str()
+                                    .ok()
+                                    .map(|v| (name.to_string(), v.to_string()))
+                            })
+                            .collect();
+
+                        // Validate follow-up Content-Length if present
+                        if let Some((_, len_str)) = resp_headers
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                        {
+                            if let Ok(content_len) = len_str.parse::<usize>() {
+                                if content_len > state.config.max_response_body_bytes {
+                                    warn!(
+                                        "CCR follow-up Content-Length {} exceeds limit of {} bytes",
+                                        content_len, state.config.max_response_body_bytes
+                                    );
+                                    record.errors = 1;
+                                    let tel = state.telemetry.clone();
+                                    let rec = record.clone();
+                                    tokio::spawn(async move {
+                                        tel.lock().await.record(&rec);
+                                    });
+                                    return Err(axum::http::StatusCode::BAD_GATEWAY);
+                                }
+                            }
+                        }
+
+                        let mut follow_up_body = Vec::new();
+                        let mut fu_stream = follow_up_resp;
+                        while let Some(chunk) = fu_stream.chunk().await.map_err(|e| {
+                            warn!("CCR follow-up response read error: {}", e);
+                            record.errors = 1;
+                            let tel = state.telemetry.clone();
+                            let rec = record.clone();
+                            tokio::spawn(async move {
+                                tel.lock().await.record(&rec);
+                            });
+                            axum::http::StatusCode::BAD_GATEWAY
+                        })? {
+                            if follow_up_body.len() + chunk.len()
+                                > state.config.max_response_body_bytes
+                            {
+                                warn!(
+                                    "CCR follow-up response body exceeded limit of {} bytes",
+                                    state.config.max_response_body_bytes
+                                );
+                                record.errors = 1;
+                                let tel = state.telemetry.clone();
+                                let rec = record.clone();
+                                tokio::spawn(async move {
+                                    tel.lock().await.record(&rec);
+                                });
+                                return Err(axum::http::StatusCode::BAD_GATEWAY);
+                            }
+                            follow_up_body.extend_from_slice(&chunk);
+                        }
+                        (None, Some(follow_up_body))
+                    }
+                    Err(e) => {
+                        warn!("CCR follow-up request failed: {}", e);
+                        record.errors = 1;
+                        let tel = state.telemetry.clone();
+                        let rec = record.clone();
+                        tokio::spawn(async move {
+                            tel.lock().await.record(&rec);
+                        });
+                        return Err(axum::http::StatusCode::BAD_GATEWAY);
+                    }
                 }
             } else {
                 (None, Some(initial_body))

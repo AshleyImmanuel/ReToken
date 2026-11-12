@@ -1401,3 +1401,270 @@ async fn test_openai_codex_prefix_caching_canonicalization() {
     assert_eq!(tools[1]["function"]["name"], "apply_patch");
     assert_eq!(tools[2]["function"]["name"], "run_tests");
 }
+
+#[tokio::test]
+async fn test_ccr_follow_up_strips_internal_retoken_headers() {
+    let turn_counter = Arc::new(tokio::sync::Mutex::new(0));
+    let tc_clone = turn_counter.clone();
+    let captured_turn2_headers = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let headers_clone = captured_turn2_headers.clone();
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let handle = ccr_store
+        .store(b"CRITICAL_AUTH_TRACE", "auth_trace")
+        .unwrap();
+    let handle_clone = handle.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let tc = tc_clone.clone();
+            let h = handle_clone.clone();
+            let ch = headers_clone.clone();
+            async move {
+                let mut count = tc.lock().await;
+                *count += 1;
+
+                if *count == 1 {
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({
+                                "id": "msg_turn1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "tool_use",
+                                        "id": "toolu_01",
+                                        "name": "retoken_retrieve",
+                                        "input": {"handle": h}
+                                    }
+                                ],
+                                "stop_reason": "tool_use"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap()
+                } else {
+                    let mut turn2_headers = Vec::new();
+                    for (k, v) in req.headers() {
+                        if let Ok(v_str) = v.to_str() {
+                            turn2_headers.push((k.to_string(), v_str.to_string()));
+                        }
+                    }
+                    *ch.lock().await = turn2_headers;
+
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({
+                                "id": "msg_turn2",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "Resolved."}],
+                                "stop_reason": "end_turn"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap()
+                }
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.ccr_enabled = true;
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let payload = serde_json::json!({
+        "model": "claude-3-5-sonnet",
+        "messages": [{"role": "user", "content": "Retrieve trace."}]
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-api-key", "secret-anthropic-key")
+        .header("anthropic-version", "2023-06-01")
+        .header("x-retoken-bypass", "false")
+        .header("x-retoken-cache", "true")
+        .header("x-retoken-repo-hash", "abc123hash")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let turn2_headers = captured_turn2_headers.lock().await;
+    // Real provider headers must be preserved
+    assert!(turn2_headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-api-key") && v == "secret-anthropic-key"));
+    assert!(turn2_headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("anthropic-version") && v == "2023-06-01"));
+
+    // Internal proxy-control headers must NOT be forwarded to upstream
+    assert!(!turn2_headers
+        .iter()
+        .any(|(k, _)| k.to_lowercase().starts_with("x-retoken-")));
+}
+
+#[tokio::test]
+async fn test_ccr_initial_response_body_limit_rejection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            // Returns oversized payload in turn 1
+            let large_padding = "x".repeat(500);
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    "{{\"id\":\"msg\",\"type\":\"message\",\"content\":\"{}\"}}",
+                    large_padding
+                )))
+                .unwrap()
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.ccr_enabled = true;
+    config.max_response_body_bytes = 200; // 200 bytes max limit
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let payload = serde_json::json!({
+        "model": "claude-3-opus",
+        "messages": [{"role": "user", "content": "Test limit"}]
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    // Exceeding response size limit in CCR must return 502 Bad Gateway and NEVER return partial response
+    assert_eq!(resp.status(), 502);
+}
+
+#[tokio::test]
+async fn test_ccr_follow_up_body_limit_rejection() {
+    let turn_counter = Arc::new(tokio::sync::Mutex::new(0));
+    let tc_clone = turn_counter.clone();
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let handle = ccr_store.store(b"SOME_DATA", "data").unwrap();
+    let handle_clone = handle.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(move || {
+            let tc = tc_clone.clone();
+            let h = handle_clone.clone();
+            async move {
+                let mut count = tc.lock().await;
+                *count += 1;
+                if *count == 1 {
+                    // Turn 1 is small and invokes tool
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::to_vec(&serde_json::json!({
+                                "id": "msg_turn1",
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "tool_use",
+                                        "id": "tu_01",
+                                        "name": "retoken_retrieve",
+                                        "input": {"handle": h}
+                                    }
+                                ],
+                                "stop_reason": "tool_use"
+                            }))
+                            .unwrap(),
+                        ))
+                        .unwrap()
+                } else {
+                    // Turn 2 returns oversized response (> 300 bytes)
+                    let huge_content = "y".repeat(800);
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Body::from(format!(
+                            "{{\"id\":\"msg2\",\"content\":\"{}\"}}",
+                            huge_content
+                        )))
+                        .unwrap()
+                }
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.ccr_enabled = true;
+    config.max_response_body_bytes = 300; // 300 bytes max limit
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let payload = serde_json::json!({
+        "model": "claude-3-opus",
+        "messages": [{"role": "user", "content": "Trigger multi turn"}]
+    });
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    // Exceeding response size in follow-up must return 502 Bad Gateway
+    assert_eq!(resp.status(), 502);
+}

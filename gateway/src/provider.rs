@@ -538,13 +538,7 @@ pub fn is_hop_by_hop_header(name: &str) -> bool {
 /// Returns true if the header is an internal ReToken control header.
 pub fn is_internal_header(name: &str) -> bool {
     let lower = name.to_lowercase();
-    matches!(
-        lower.as_str(),
-        "x-retoken-bypass"
-            | "x-retoken-upstream-url"
-            | "x-retoken-provider-name"
-            | "x-retoken-repo-hash"
-    )
+    lower.starts_with("x-retoken-")
 }
 
 #[cfg(test)]
@@ -675,6 +669,20 @@ mod tests {
         assert!(!is_sensitive_header("Content-Type"));
         assert!(!is_sensitive_header("Accept"));
         assert!(!is_sensitive_header("User-Agent"));
+    }
+
+    #[test]
+    fn test_is_internal_header() {
+        assert!(is_internal_header("x-retoken-bypass"));
+        assert!(is_internal_header("X-ReToken-Upstream-URL"));
+        assert!(is_internal_header("x-retoken-cache"));
+        assert!(is_internal_header("x-retoken-no-cache"));
+        assert!(is_internal_header("x-retoken-repo-hash"));
+        assert!(is_internal_header("x-retoken-custom-control"));
+        assert!(!is_internal_header("Authorization"));
+        assert!(!is_internal_header("x-api-key"));
+        assert!(!is_internal_header("anthropic-version"));
+        assert!(!is_internal_header("content-type"));
     }
 
     #[test]

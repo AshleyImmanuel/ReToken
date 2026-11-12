@@ -1225,7 +1225,6 @@ name = "retrieval"
 version = "0.1.0"
 dependencies = [
  "analyzers",
- "retoken_core",
  "serde_json",
 ]
 
