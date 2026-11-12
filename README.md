@@ -86,21 +86,24 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 | :--- | :--- | :--- |
 | `retoken run` | Implemented | Starts the local HTTP intercepting proxy daemon on `127.0.0.1:8888`. |
 | `retoken wrap <cmd>` | Implemented | Wraps CLI agents (e.g. `claude`, `aider`), injecting proxy endpoints with process readiness checks. |
-| `retoken analyze [path]` | Implemented | Scans repository source files and builds symbol and dependency graphs. |
+| `retoken doctor` | Implemented | Diagnoses local gateway status, port binding, and upstream provider reachability. |
+| `retoken stats` | Implemented | Displays telemetry settings, runtime parameters, and flight recorder configuration. |
+| `retoken cache [action]` | Implemented | Inspects cache capacity/status or clears local cache state. |
+| `retoken analyze [path]` | Implemented | Multi-language syntax analyzer scanning symbols and dependency graphs (Rust, Python, TS/JS). |
 | `retoken init` | Implemented | Injects ReToken agent guidance skills into `.claudecode` and `.gemini`. |
-| `retoken stats` | Roadmap | Aggregated token savings, compression ratios, and flight recorder telemetry dashboard. |
 | `retoken trace` | Roadmap | Per-request payload inspection and CCR handle resolution tracking. |
 | `retoken benchmark` | Roadmap | End-to-end compression ratio and latency benchmarking against standardized workloads. |
-| `retoken doctor` | Roadmap | Diagnostic suite checking loopback binding, provider connectivity, and environment variables. |
 
 ---
 
 ## Security & Operational Controls
 
-- **SSRF Protection**: Custom upstreams passed via `x-retoken-upstream-url` strictly disallow loopback (`127.0.0.0/8`), private RFC1918 subnets, and cloud metadata addresses (`169.254.169.254`). Set `RETOKEN_ALLOW_PRIVATE_UPSTREAMS=true` only for local testing.
+- **Configuration File & Environment Overrides**: Automatically loads `retoken.json` or `.retoken.json` from the repository root, with seamless environment variable overrides (`RETOKEN_*`).
+- **SSRF Protection & Host Allowlists**: Custom upstreams passed via `x-retoken-upstream-url` strictly disallow loopback (`127.0.0.0/8`, `localhost`), private RFC1918 subnets, and cloud metadata addresses (`169.254.169.254`). Specific allowed hosts can be configured via `allowed_upstream_hosts` / `RETOKEN_ALLOWED_UPSTREAM_HOSTS`.
 - **Credential-Isolated Caching**: Response cache keys include a SHA-256 fingerprint of the request's credentials (`Authorization` or `x-api-key`), preventing cross-tenant cache pollution.
-- **Cache Opt-Out**: Requests with `Cache-Control: no-cache`, `no-store`, or `x-retoken-cache: false` bypass cache lookup and storage entirely.
-- **Request Size Limits**: Max request body size is capped by `RETOKEN_MAX_REQUEST_BODY_BYTES` (default 10 MB). Requests exceeding the limit return `413 Payload Too Large`.
+- **Stochastic Completion Safety**: Model generations with `temperature > 0.0` bypass the response cache by default to prevent frozen non-deterministic responses, unless explicitly opted into via `x-retoken-cache-stochastic: true`.
+- **Cache Opt-Out**: Requests with `Cache-Control: no-cache`, `no-store`, `Pragma: no-cache`, or `x-retoken-cache: false` bypass cache lookup and storage entirely.
+- **Request Size Limits & Timeouts**: Request body size is capped by `RETOKEN_MAX_REQUEST_BODY_BYTES` (default 10 MB, returning 413 on exceed). Network requests to upstream providers enforce a strict safety timeout (`upstream_timeout_secs`, default 60s).
 
 ---
 

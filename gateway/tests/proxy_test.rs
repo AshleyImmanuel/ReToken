@@ -479,3 +479,74 @@ async fn test_cache_credential_isolation_and_no_cache_opt_out() {
     assert_eq!(resp4.headers().get("x-retoken-cache").unwrap(), "miss");
     assert_eq!(count.load(Ordering::SeqCst), 3);
 }
+
+#[tokio::test]
+async fn test_upstream_allowlist_enforcement() {
+    let (upstream_url, _) = start_mock_upstream().await;
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allowed_upstream_hosts = vec!["api.anthropic.com".into(), "*.trusted.com".into()];
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    // Host not in allowlist rejected
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-retoken-upstream-url", "https://api.untrusted.com/v1")
+        .body(Body::from(b"{}".to_vec()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Host in wildcard allowlist accepted
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("x-retoken-upstream-url", "https://llm.trusted.com/v1")
+        .body(Body::from(b"{}".to_vec()))
+        .unwrap();
+    let resp2 = app.oneshot(req2).await.unwrap();
+    assert_ne!(resp2.status(), 400);
+}
+
+#[tokio::test]
+async fn test_stochastic_temperature_bypasses_cache() {
+    let (upstream_url, count) = start_mock_upstream().await;
+    let app = create_test_gateway(&upstream_url);
+
+    let req_body = serde_json::json!({
+        "model": "claude-3-opus",
+        "temperature": 0.8,
+        "messages": [
+            {"role": "user", "content": "Tell me a random story"}
+        ]
+    });
+    let payload = serde_json::to_vec(&req_body).unwrap();
+
+    // 1st request with temperature 0.8
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.clone()))
+        .unwrap();
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), 200);
+    assert_eq!(resp1.headers().get("x-retoken-cache").unwrap(), "miss");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+
+    // 2nd duplicate request with temperature 0.8 -> also MISS (stochastic generation bypasses cache)
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(payload))
+        .unwrap();
+    let resp2 = app.oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), 200);
+    assert_eq!(resp2.headers().get("x-retoken-cache").unwrap(), "miss");
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}

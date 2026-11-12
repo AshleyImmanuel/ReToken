@@ -27,16 +27,24 @@
   * **Context Package Idempotency**: Fixed `ContextPackage::add` in `retrieval/src/package.rs` to check set membership before budget validation, preventing redundant token accrual and false budget rejections on duplicate object additions.
   * **Expanded Unit Test Coverage**: Added targeted unit tests across `analyzers` (`scanner.rs`), `core` (`recorder.rs`), `scheduler` (`dag.rs`, `prefetch.rs`, `task.rs`, `virtualization.rs`), and `retrieval` (`planner.rs`, `package.rs`), expanding workspace tests from 23 to 62 passing tests with 0 failures.
   * **Documentation & Architecture Grounding**: Updated `README.md` and `ARCHITECTURE.md` to accurately reflect the implemented codebase (exact request caching, in-memory session engine, native streaming passthrough, and transparent Anthropic CCR recovery).
+* **Enterprise Controls, CLI Diagnostics & Analyzer Maturity**:
+  * **Configuration File System**: Added `AppConfig::load()` supporting `retoken.json`, `.retoken.json`, and `.retoken/config.json` with seamless environment variable overrides.
+  * **Upstream Host Allowlists**: Added `allowed_upstream_hosts` in `AppConfig` and `gateway/src/provider.rs` with exact match and wildcard (`*.domain`) pattern support to strictly confine custom upstreams to approved domains.
+  * **Upstream Request Timeouts**: Configured `reqwest::Client` with `upstream_timeout_secs` (default 60s) to prevent hung provider requests from blocking connections indefinitely.
+  * **Stochastic Generation Cache Safety**: Guarded against returning stale non-deterministic responses by bypassing cache when `temperature > 0.0`, unless explicitly opted into via `x-retoken-cache-stochastic: true`.
+  * **CLI Diagnostics & Administration**: Implemented `retoken doctor` (system, network, gateway reachability, and provider connectivity checks), `retoken stats` (telemetry and runtime configuration overview), and `retoken cache` (status inspection and cache reset).
+  * **Multi-Language Symbol & Dependency Analysis**: Enhanced `analyzers/src/symbols.rs` to extract functions, classes, structs, enums, traits, and imports across Rust, Python, and TypeScript/JavaScript. Added bidirectional graph resolution (`dependencies_of` and `dependents_of`) in `analyzers/src/graph.rs`.
+  * **Continuous Integration (CI) Workflow**: Created `.github/workflows/ci.yml` running formatting, clippy lints, test suites, and workspace compilation on push and pull requests.
 * **Security, Isolation & Operational Hardening**:
   * **SSRF Protection on Custom Upstreams**: Implemented `is_private_or_loopback_host` and trust policy in `gateway/src/provider.rs`. Untrusted `x-retoken-upstream-url` headers strictly disallow loopback (`127.0.0.0/8`, `localhost`), link-local metadata addresses (`169.254.169.254`), and private RFC1918 subnets unless explicitly enabled with `RETOKEN_ALLOW_PRIVATE_UPSTREAMS=true`.
   * **Credential-Isolated Response Caching**: Expanded `ResponseCache::cache_key_with_context` to incorporate a SHA-256 fingerprint of the request's credentials (`Authorization` or `x-api-key`), guaranteeing strict cross-tenant cache isolation and preventing cache leakage across different API keys.
   * **Cache Opt-Out Directives**: Honors `Cache-Control: no-cache`, `no-store`, `Pragma: no-cache`, and `x-retoken-cache: false` / `x-retoken-no-cache: true`, completely bypassing cache lookup and response storage.
   * **Configurable Request Body Limit**: Replaced unbounded `usize::MAX` body reads with `AppConfig::max_request_body_bytes` (default 10 MB, configurable via `RETOKEN_MAX_REQUEST_BODY_BYTES`), rejecting oversized payloads with `413 Payload Too Large`.
   * **Resilient Process Handling (`retoken wrap`)**: Replaced panics (`unwrap`/`expect`) in `cli/src/wrap.rs` with `anyhow::Context` error propagation, and added a readiness socket polling loop (3-second timeout) ensuring the background gateway daemon is healthy and reachable before launching wrapped commands.
-  * **CLI Documentation & Roadmap Grounding**: Updated `README.md` with an explicit CLI status matrix clearly separating implemented commands (`run`, `wrap`, `analyze`, `init`) from planned roadmap diagnostics (`stats`, `trace`, `benchmark`, `doctor`).
+  * **CLI Documentation & Roadmap Grounding**: Updated `README.md` with an explicit CLI status matrix clearly separating implemented commands (`run`, `wrap`, `analyze`, `init`, `doctor`, `stats`, `cache`) from planned roadmap diagnostics (`trace`, `benchmark`).
 * **Integration Testing & Verification**:
-  * Added 3 integration tests in `gateway/tests/proxy_test.rs` covering SSRF rejection of private and metadata addresses, 413 Payload Too Large limits, and credential-isolated caching with cache-control opt-out.
-  * Expanded workspace test coverage from 23 to 65 passing tests with 0 failures across all crates.
+  * Added integration tests covering host allowlist enforcement and stochastic temperature cache bypass.
+  * Expanded workspace test coverage from 23 to 71 passing tests with 0 failures across all crates.
   * Verified code quality with `cargo fmt --check`, `cargo test --workspace`, and `cargo build --workspace`.
 
 ### Antigravity (2026-09-29)

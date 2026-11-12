@@ -308,6 +308,7 @@ dependencies = [
  "anyhow",
  "clap",
  "gateway",
+ "reqwest",
  "retoken_core",
  "tokio",
  "tracing",

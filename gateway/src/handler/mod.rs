@@ -66,6 +66,7 @@ pub async fn handler(
         path_and_query,
         &req_headers,
         state.config.allow_private_upstreams,
+        &state.config.allowed_upstream_hosts,
     ) {
         Ok(p) => p,
         Err(err) => {
@@ -132,9 +133,13 @@ pub async fn handler(
     let mut json_body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
 
     let mut is_stream = false;
+    let mut temperature: Option<f64> = None;
     if let Some(ref jb) = json_body {
         if let Some(model) = jb.get("model").and_then(|m| m.as_str()) {
             record.model = model.to_string();
+        }
+        if let Some(temp) = jb.get("temperature").and_then(|t| t.as_f64()) {
+            temperature = Some(temp);
         }
         if let Some(stream_val) = jb.get("stream").and_then(|s| s.as_bool()) {
             is_stream = stream_val;
@@ -173,7 +178,7 @@ pub async fn handler(
         .map(|(_, v)| ResponseCache::hash_credential(v));
 
     // Check for cache opt-out / no-cache directives
-    let no_cache = req_headers.iter().any(|(n, v)| {
+    let header_no_cache = req_headers.iter().any(|(n, v)| {
         (n.eq_ignore_ascii_case("cache-control")
             && (v.contains("no-cache") || v.contains("no-store")))
             || (n.eq_ignore_ascii_case("pragma") && v.contains("no-cache"))
@@ -182,7 +187,15 @@ pub async fn handler(
             || (n.eq_ignore_ascii_case("x-retoken-no-cache") && (v == "true" || v == "1"))
     });
 
-    // Exact Cache Lookup (NEVER check or return cache for streaming or no-cache requests)
+    // Non-zero temperature completions are non-deterministic; bypass cache unless client explicitly requests caching stochastic responses
+    let is_stochastic = temperature.is_some_and(|t| t > 0.0);
+    let allow_stochastic_cache = req_headers.iter().any(|(n, v)| {
+        n.eq_ignore_ascii_case("x-retoken-cache-stochastic") && (v == "true" || v == "1")
+    });
+    let stochastic_bypassed = is_stochastic && !allow_stochastic_cache;
+    let no_cache = header_no_cache || stochastic_bypassed;
+
+    // Exact Cache Lookup (NEVER check or return cache for streaming, stochastic, or no-cache requests)
     if state.config.cache_enabled && !is_stream && !no_cache {
         let cache_key = ResponseCache::cache_key_with_context(
             method.as_str(),

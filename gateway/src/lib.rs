@@ -55,7 +55,12 @@ pub fn app(state_engine: Arc<Mutex<StateEngine>>, config: AppConfig) -> Router {
         }
     };
 
-    app_with_client(Client::new(), state_engine, config, ccr_store)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(config.upstream_timeout_secs))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    app_with_client(client, state_engine, config, ccr_store)
 }
 
 pub async fn start(config: AppConfig) -> anyhow::Result<()> {
