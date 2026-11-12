@@ -20,6 +20,17 @@
 
 ---
 
+## Maturity Status & Operational Caveats
+
+> [!WARNING]
+> **Project Maturity**: ReToken is an **early production candidate / serious prototype**, not mature enterprise LLM proxy infrastructure.
+>
+> 1. **Default Lossless Operation**: In default configuration (`compression_enabled: false`, `ccr_enabled: false`, `terse_mode: false`, `prompt_caching_enabled: false`), ReToken acts as a strictly lossless, bit-for-bit transparent pass-through proxy with connection-time SSRF pinning, request/response memory limits, and exact-hash caching for idempotent endpoints.
+> 2. **Stateful Replay in CCR**: The live CCR engine dispatches protocol-compliant `tool_result` turns back to the provider when the model invokes `retoken_retrieve`. However, stateful request replay across a transparent HTTP proxy is an advanced pattern that has not been battle-tested against high-volume production Anthropic traffic under real-world edge cases (e.g. concurrent tool execution, aggressive rate limits, stream conversion).
+> 3. **Non-Trivial Behavior Modifications**: Opting into `compression_enabled`, `ccr_enabled`, or `terse_mode` actively modifies prompt structures, elides repetitive tool outputs, or instructs the model toward extreme brevity. Keep these flags disabled if model answer richness and exact prompt preservation are required.
+
+---
+
 ## Documentation for Humans
 
 ### Installation
