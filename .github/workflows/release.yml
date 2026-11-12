@@ -5,25 +5,96 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
-  build-and-release:
-    runs-on: windows-latest
-    permissions:
-      contents: write
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_name: retoken
+            archive_name: retoken-x86_64-unknown-linux-gnu.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            bin_name: retoken
+            archive_name: retoken-x86_64-apple-darwin.tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin_name: retoken
+            archive_name: retoken-aarch64-apple-darwin.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin_name: retoken.exe
+            archive_name: retoken-x86_64-pc-windows-msvc.zip
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
-        
-      - name: Build CLI
-        run: cargo build --release -p cli
-        
-      - name: Rename binary
-        run: move target\release\cli.exe retoken-windows-amd64.exe
-        
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
         with:
-          files: retoken-windows-amd64.exe
+          targets: ${{ matrix.target }}
+
+      - name: Build Release Binary
+        run: cargo build --release -p cli --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.bin_name }} dist/
+          cd dist
+          tar -czf ${{ matrix.archive_name }} ${{ matrix.bin_name }}
+          shasum -a 256 ${{ matrix.archive_name }} > ${{ matrix.archive_name }}.sha256
+          rm ${{ matrix.bin_name }}
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item target/${{ matrix.target }}/release/${{ matrix.bin_name }} -Destination dist/
+          Compress-Archive -Path dist/${{ matrix.bin_name }} -DestinationPath dist/${{ matrix.archive_name }}
+          $hash = (Get-FileHash -Algorithm SHA256 dist/${{ matrix.archive_name }}).Hash.ToLower()
+          "$hash  ${{ matrix.archive_name }}" | Out-File -Encoding utf8 -FilePath dist/${{ matrix.archive_name }}.sha256
+          Remove-Item dist/${{ matrix.bin_name }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Aggregate Checksums and Flatten
+        run: |
+          mkdir -p release_assets
+          find dist -type f -name "*.tar.gz" -o -name "*.zip" | while read -r file; do
+            cp "$file" release_assets/
+          done
+          find dist -type f -name "*.sha256" | while read -r file; do
+            cat "$file" >> release_assets/checksums.txt
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*
           generate_release_notes: true

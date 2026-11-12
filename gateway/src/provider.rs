@@ -215,6 +215,70 @@ pub fn validate_upstream_url(
     Ok(clean)
 }
 
+/// Resolves a host to its socket addresses, verifies that all resolved IP addresses are safe
+/// under the SSRF policy (non-loopback, non-private, non-metadata), and returns the first
+/// verified SocketAddr to allow connect-time IP pinning.
+pub fn resolve_and_verify_destination(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+) -> Result<Option<std::net::SocketAddr>, String> {
+    if allow_private {
+        return Ok(None);
+    }
+
+    let clean = host.trim().trim_start_matches('[').trim_end_matches(']');
+
+    // Check if host is an explicit IP literal
+    if let Ok(ip) = clean.parse::<IpAddr>() {
+        if is_private_or_loopback_ip(ip) {
+            return Err(format!(
+                "Destination IP '{}' targets a loopback, local, or private address (disallowed by SSRF policy)",
+                ip
+            ));
+        }
+        return Ok(Some(std::net::SocketAddr::new(ip, port)));
+    }
+
+    // Static check for internal domain suffixes
+    if is_private_or_loopback_host(clean) {
+        return Err(format!(
+            "Destination host '{}' targets a loopback, local, or internal address (disallowed by SSRF policy)",
+            clean
+        ));
+    }
+
+    // Resolve DNS and verify ALL resolved addresses
+    let addrs = (clean, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("Failed to resolve destination host '{}': {}", clean, e))?;
+
+    let mut first_addr = None;
+    let mut resolved_any = false;
+    for addr in addrs {
+        resolved_any = true;
+        if is_private_or_loopback_ip(addr.ip()) {
+            return Err(format!(
+                "Destination host '{}' resolved to private/loopback IP '{}' (blocked by SSRF protection)",
+                clean,
+                addr.ip()
+            ));
+        }
+        if first_addr.is_none() {
+            first_addr = Some(addr);
+        }
+    }
+
+    if !resolved_any {
+        return Err(format!(
+            "Destination host '{}' did not resolve to any addresses",
+            clean
+        ));
+    }
+
+    Ok(first_addr)
+}
+
 /// Detects the provider from the incoming request's path and headers.
 ///
 /// Detection strategy:

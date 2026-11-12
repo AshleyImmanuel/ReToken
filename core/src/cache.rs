@@ -78,27 +78,42 @@ impl ResponseCache {
         result.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
+    /// Returns true if a header is a hop-by-hop or local proxy control header that should
+    /// not affect caching keys.
+    pub fn is_hop_by_hop_or_proxy_header(header_name: &str) -> bool {
+        let lower = header_name.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailer"
+                | "trailers"
+                | "transfer-encoding"
+                | "upgrade"
+                | "host"
+                | "content-length"
+                | "x-forwarded-for"
+                | "x-forwarded-proto"
+                | "x-forwarded-host"
+        ) || lower.starts_with("x-retoken-")
+    }
+
     /// Compute a SHA256 fingerprint from credentials and all response-affecting headers.
+    /// Excludes only hop-by-hop transport headers and internal proxy control headers.
+    /// Any difference in client headers (auth tokens, custom model options, organization IDs,
+    /// beta flags, versions) yields a distinct fingerprint to guarantee isolation.
     pub fn compute_context_fingerprint(headers: &[(String, String)]) -> Option<String> {
         use sha2::{Digest, Sha256};
         let mut relevant: Vec<(&str, &str)> = headers
             .iter()
             .filter_map(|(k, v)| {
-                let lower = k.to_ascii_lowercase();
-                match lower.as_str() {
-                    "authorization"
-                    | "x-api-key"
-                    | "api-key"
-                    | "x-goog-api-key"
-                    | "anthropic-version"
-                    | "anthropic-beta"
-                    | "openai-organization"
-                    | "openai-project"
-                    | "openai-version"
-                    | "accept"
-                    | "content-type"
-                    | "x-retoken-provider-name" => Some((k.as_str(), v.as_str())),
-                    _ => None,
+                if Self::is_hop_by_hop_or_proxy_header(k) {
+                    None
+                } else {
+                    Some((k.as_str(), v.as_str()))
                 }
             })
             .collect();
@@ -362,6 +377,46 @@ mod tests {
         assert_ne!(
             fp1, fp3,
             "differing organization must yield different fingerprint"
+        );
+
+        // Custom headers isolation test
+        let custom_a = vec![
+            ("Authorization".to_string(), "Bearer sk-123".to_string()),
+            (
+                "X-Custom-Model-Variant".to_string(),
+                "fast-tier".to_string(),
+            ),
+        ];
+        let custom_b = vec![
+            ("Authorization".to_string(), "Bearer sk-123".to_string()),
+            (
+                "X-Custom-Model-Variant".to_string(),
+                "precision-tier".to_string(),
+            ),
+        ];
+        let fp_custom_a = ResponseCache::compute_context_fingerprint(&custom_a);
+        let fp_custom_b = ResponseCache::compute_context_fingerprint(&custom_b);
+        assert_ne!(
+            fp_custom_a, fp_custom_b,
+            "differing custom headers must isolate cache fingerprints"
+        );
+
+        // Hop-by-hop and proxy headers exclusion test
+        let with_transport = vec![
+            ("Authorization".to_string(), "Bearer sk-123".to_string()),
+            ("Host".to_string(), "127.0.0.1:8888".to_string()),
+            ("Connection".to_string(), "keep-alive".to_string()),
+            (
+                "x-retoken-upstream-url".to_string(),
+                "https://api.anthropic.com".to_string(),
+            ),
+            ("x-retoken-cache".to_string(), "true".to_string()),
+        ];
+        let without_transport = vec![("Authorization".to_string(), "Bearer sk-123".to_string())];
+        assert_eq!(
+            ResponseCache::compute_context_fingerprint(&with_transport),
+            ResponseCache::compute_context_fingerprint(&without_transport),
+            "hop-by-hop and retoken proxy control headers must be excluded from context fingerprint"
         );
     }
 

@@ -261,22 +261,52 @@ pub async fn handler(
         .build()
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
-    // Pre-flight SSRF check on outgoing request URL destination
-    if !state.config.allow_private_upstreams {
-        if let Some(host) = reqwest_req.url().host_str() {
-            if crate::provider::is_private_or_loopback_host(host) {
+    // Connect-time SSRF verification & IP pinning
+    let client_to_use = if !state.config.allow_private_upstreams {
+        let dest_url = reqwest_req.url();
+        let host = dest_url
+            .host_str()
+            .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+        let port = dest_url
+            .port_or_known_default()
+            .unwrap_or(if dest_url.scheme() == "https" {
+                443
+            } else {
+                80
+            });
+
+        match crate::provider::resolve_and_verify_destination(
+            host,
+            port,
+            state.config.allow_private_upstreams,
+        ) {
+            Ok(Some(verified_addr)) => {
+                // Pin client to the verified address to prevent TOCTOU DNS rebinding
+                reqwest::Client::builder()
+                    .resolve(host, verified_addr)
+                    .timeout(std::time::Duration::from_secs(
+                        state.config.upstream_timeout_secs,
+                    ))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?
+            }
+            Ok(None) => state.client.clone(),
+            Err(e) => {
                 warn!(
-                    "Outbound request destination '{}' blocked by SSRF policy",
-                    host
+                    "Outbound connection destination blocked by SSRF policy: {}",
+                    e
                 );
                 record.errors = 1;
                 state.telemetry.lock().await.record(&record);
                 return Err(axum::http::StatusCode::FORBIDDEN);
             }
         }
-    }
+    } else {
+        state.client.clone()
+    };
 
-    let resp = state.client.execute(reqwest_req).await.map_err(|e| {
+    let resp = client_to_use.execute(reqwest_req).await.map_err(|e| {
         warn!("Provider request failed: {}", e);
         record.errors = 1;
         let tel = state.telemetry.clone();
@@ -308,6 +338,7 @@ pub async fn handler(
         resp_headers,
         resp,
         is_stream,
+        state.config.max_response_body_bytes,
         &detected_provider,
         Some(upstream_base),
         &mut record,

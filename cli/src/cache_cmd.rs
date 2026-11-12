@@ -1,12 +1,10 @@
+use crate::CacheCommands;
 use retoken_core::config::AppConfig;
 use std::time::Duration;
 
-pub async fn run_cache(action: Option<String>) -> anyhow::Result<()> {
+pub async fn run_cache(cmd: Option<CacheCommands>) -> anyhow::Result<()> {
     let config = AppConfig::load()?;
-    let action_str = action.unwrap_or_else(|| "status".to_string());
-    let mut parts = action_str.split_whitespace();
-    let action = parts.next().unwrap_or("status");
-    let target_key = parts.next();
+    let action = cmd.unwrap_or(CacheCommands::Status);
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(800))
@@ -14,7 +12,7 @@ pub async fn run_cache(action: Option<String>) -> anyhow::Result<()> {
     let admin_url = format!("http://127.0.0.1:{}", config.port);
 
     match action {
-        "status" | "inspect" => {
+        CacheCommands::Status => {
             println!("ReToken Cache Status");
             println!("====================");
             println!("  Cache Enabled: {}", config.cache_enabled);
@@ -138,7 +136,7 @@ pub async fn run_cache(action: Option<String>) -> anyhow::Result<()> {
                 }
             }
         }
-        "clear" => {
+        CacheCommands::Clear => {
             let clear_url = format!("{}/_retoken/cache/clear", admin_url);
             match client.post(&clear_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -181,32 +179,22 @@ pub async fn run_cache(action: Option<String>) -> anyhow::Result<()> {
                 }
             }
         }
-        "invalidate" => {
-            if let Some(key) = target_key {
-                let inv_url = format!("{}/_retoken/cache?key={}", admin_url, key);
-                match client.delete(&inv_url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        println!("[OK] Cache entry '{}' successfully invalidated.", key);
-                    }
-                    Ok(resp) => {
-                        println!("[WARN] Invalidation returned status HTTP {}", resp.status());
-                    }
-                    Err(e) => {
-                        println!(
-                            "[ERROR] Failed to connect to gateway at {}: {}",
-                            admin_url, e
-                        );
-                    }
+        CacheCommands::Invalidate { key } => {
+            let inv_url = format!("{}/_retoken/cache?key={}", admin_url, key);
+            match client.delete(&inv_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    println!("[OK] Cache entry '{}' successfully invalidated.", key);
                 }
-            } else {
-                println!("Usage: retoken cache invalidate <key>");
+                Ok(resp) => {
+                    println!("[WARN] Invalidation returned status HTTP {}", resp.status());
+                }
+                Err(e) => {
+                    println!(
+                        "[ERROR] Failed to connect to gateway at {}: {}",
+                        admin_url, e
+                    );
+                }
             }
-        }
-        other => {
-            println!(
-                "Unknown cache action: '{}'. Supported actions: status, inspect, clear, invalidate <key>",
-                other
-            );
         }
     }
 

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub token_budget: usize,
     pub sandbox_mode: SandboxMode,
@@ -15,6 +16,8 @@ pub struct AppConfig {
 
     /// Maximum request body size in bytes before returning 413 Payload Too Large (default: 10MB).
     pub max_request_body_bytes: usize,
+    /// Maximum response body size in bytes before returning 502 Bad Gateway (default: 10MB).
+    pub max_response_body_bytes: usize,
     /// Whether custom upstream URLs are allowed to target loopback, private, or local network hosts (default: false).
     pub allow_private_upstreams: bool,
     /// Explicit allowlist of permissible upstream host patterns (e.g. `["api.anthropic.com", "*.openai.com"]`). Empty allows any non-private host.
@@ -29,29 +32,46 @@ pub struct AppConfig {
     pub openai_base_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum SandboxMode {
+    #[default]
     Native,
     Virtual,
+}
+
+fn parse_env_var<T: std::str::FromStr>(name: &str) -> Option<T> {
+    if let Ok(val) = std::env::var(name) {
+        match val.parse::<T>() {
+            Ok(parsed) => Some(parsed),
+            Err(_) => {
+                tracing::warn!(
+                    "Environment variable {} has invalid value '{}'. Ignoring and retaining previous value.",
+                    name,
+                    val
+                );
+                None
+            }
+        }
+    } else {
+        None
+    }
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            token_budget: std::env::var("RETOKEN_TOKEN_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(32_000),
+            token_budget: parse_env_var("RETOKEN_TOKEN_BUDGET").unwrap_or(32_000),
             sandbox_mode: SandboxMode::Native,
-            cache_enabled: std::env::var("RETOKEN_CACHE_ENABLED").ok().and_then(|v| v.parse().ok()).unwrap_or(true),
-            cache_ttl_secs: std::env::var("RETOKEN_CACHE_TTL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(300),
-            max_cache_entries: std::env::var("RETOKEN_MAX_CACHE_ENTRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(1024),
-            terse_mode: std::env::var("RETOKEN_TERSE_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(true),
-            port: std::env::var("RETOKEN_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8888),
-            max_request_body_bytes: std::env::var("RETOKEN_MAX_REQUEST_BODY_BYTES")
-                .ok()
-                .and_then(|v| v.parse().ok())
+            cache_enabled: parse_env_var("RETOKEN_CACHE_ENABLED").unwrap_or(true),
+            cache_ttl_secs: parse_env_var("RETOKEN_CACHE_TTL_SECS").unwrap_or(300),
+            max_cache_entries: parse_env_var("RETOKEN_MAX_CACHE_ENTRIES").unwrap_or(1024),
+            terse_mode: parse_env_var("RETOKEN_TERSE_MODE").unwrap_or(true),
+            port: parse_env_var("RETOKEN_PORT").unwrap_or(8888),
+            max_request_body_bytes: parse_env_var("RETOKEN_MAX_REQUEST_BODY_BYTES")
                 .unwrap_or(10 * 1024 * 1024),
-            allow_private_upstreams: std::env::var("RETOKEN_ALLOW_PRIVATE_UPSTREAMS")
-                .ok()
-                .and_then(|v| v.parse().ok())
+            max_response_body_bytes: parse_env_var("RETOKEN_MAX_RESPONSE_BODY_BYTES")
+                .unwrap_or(10 * 1024 * 1024),
+            allow_private_upstreams: parse_env_var("RETOKEN_ALLOW_PRIVATE_UPSTREAMS")
                 .unwrap_or(false),
             allowed_upstream_hosts: std::env::var("RETOKEN_ALLOWED_UPSTREAM_HOSTS")
                 .ok()
@@ -62,9 +82,7 @@ impl Default for AppConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
-            upstream_timeout_secs: std::env::var("RETOKEN_UPSTREAM_TIMEOUT_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
+            upstream_timeout_secs: parse_env_var("RETOKEN_UPSTREAM_TIMEOUT_SECS")
                 .unwrap_or(60),
             persona_prompt: std::env::var("RETOKEN_PERSONA_PROMPT").unwrap_or_else(|_| "[ReToken Terse Mode Active (Inspired by Caveman). Extreme brevity. Zero pleasantries. Provide only raw technical data, code, or direct answers. Omit explanations. If data is elided with <<handle>>, use retoken_retrieve to fetch it instead of guessing.]".to_string()),
             elision_note: std::env::var("RETOKEN_ELISION_NOTE").unwrap_or_else(|_| "Elements elided by ReToken. Original recoverable via retoken_retrieve tool.".to_string()),
@@ -101,52 +119,31 @@ impl AppConfig {
     }
 
     pub fn apply_env_overrides(&mut self) {
-        if let Some(v) = std::env::var("RETOKEN_TOKEN_BUDGET")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_TOKEN_BUDGET") {
             self.token_budget = v;
         }
-        if let Some(v) = std::env::var("RETOKEN_CACHE_ENABLED")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_CACHE_ENABLED") {
             self.cache_enabled = v;
         }
-        if let Some(v) = std::env::var("RETOKEN_CACHE_TTL_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_CACHE_TTL_SECS") {
             self.cache_ttl_secs = v;
         }
-        if let Some(v) = std::env::var("RETOKEN_MAX_CACHE_ENTRIES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_MAX_CACHE_ENTRIES") {
             self.max_cache_entries = v;
         }
-        if let Some(v) = std::env::var("RETOKEN_TERSE_MODE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_TERSE_MODE") {
             self.terse_mode = v;
         }
-        if let Some(v) = std::env::var("RETOKEN_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_PORT") {
             self.port = v;
         }
-        if let Some(v) = std::env::var("RETOKEN_MAX_REQUEST_BODY_BYTES")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_MAX_REQUEST_BODY_BYTES") {
             self.max_request_body_bytes = v;
         }
-        if let Some(v) = std::env::var("RETOKEN_ALLOW_PRIVATE_UPSTREAMS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_MAX_RESPONSE_BODY_BYTES") {
+            self.max_response_body_bytes = v;
+        }
+        if let Some(v) = parse_env_var("RETOKEN_ALLOW_PRIVATE_UPSTREAMS") {
             self.allow_private_upstreams = v;
         }
         if let Ok(hosts) = std::env::var("RETOKEN_ALLOWED_UPSTREAM_HOSTS") {
@@ -156,10 +153,7 @@ impl AppConfig {
                 .filter(|item| !item.is_empty())
                 .collect();
         }
-        if let Some(v) = std::env::var("RETOKEN_UPSTREAM_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(v) = parse_env_var("RETOKEN_UPSTREAM_TIMEOUT_SECS") {
             self.upstream_timeout_secs = v;
         }
         if let Ok(v) = std::env::var("RETOKEN_PERSONA_PROMPT") {
@@ -187,8 +181,21 @@ mod tests {
         assert_eq!(config.port, 8888);
         assert!(!config.allow_private_upstreams);
         assert_eq!(config.max_request_body_bytes, 10 * 1024 * 1024);
+        assert_eq!(config.max_response_body_bytes, 10 * 1024 * 1024);
         assert_eq!(config.upstream_timeout_secs, 60);
         assert!(config.allowed_upstream_hosts.is_empty());
+    }
+
+    #[test]
+    fn test_app_config_partial_json_deserialization() {
+        let partial_json = r#"{"port": 9090, "upstream_timeout_secs": 120}"#;
+        let loaded: AppConfig = serde_json::from_str(partial_json)
+            .expect("Partial JSON configuration must succeed with serde defaults");
+        assert_eq!(loaded.port, 9090);
+        assert_eq!(loaded.upstream_timeout_secs, 120);
+        assert_eq!(loaded.token_budget, 32_000);
+        assert!(loaded.cache_enabled);
+        assert_eq!(loaded.max_response_body_bytes, 10 * 1024 * 1024);
     }
 
     #[test]

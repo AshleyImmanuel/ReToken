@@ -6,7 +6,7 @@ pub async fn run_wrap(inject: Vec<String>, command: Vec<String>) -> anyhow::Resu
         anyhow::bail!("wrap requires a command to execute (e.g. `retoken wrap claude`)");
     }
 
-    let config = AppConfig::default();
+    let config = AppConfig::load()?;
     let proxy_addr = format!("127.0.0.1:{}", config.port);
     let proxy_url = format!("http://127.0.0.1:{}/v1", config.port);
 

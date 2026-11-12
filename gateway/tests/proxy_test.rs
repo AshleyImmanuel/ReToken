@@ -775,3 +775,148 @@ async fn test_admin_cache_list_and_single_key_invalidation() {
     let list_json2: serde_json::Value = serde_json::from_slice(&bytes2).unwrap();
     assert_eq!(list_json2["count"], 0);
 }
+
+#[tokio::test]
+async fn test_response_body_size_limit_rejection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(|| async {
+            let big_body = vec![b'x'; 500]; // 500 bytes response
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(big_body))
+                .unwrap()
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.max_response_body_bytes = 100; // 100-byte max limit
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .body(Body::from(b"{}".to_vec()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 502); // 502 Bad Gateway due to response body size violation
+}
+
+#[tokio::test]
+async fn test_response_side_stream_detection_bypasses_cache() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let count_clone = call_count.clone();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream_url = format!("http://{}", addr);
+
+    let app_mock = Router::new().route(
+        "/v1/messages",
+        post(move || {
+            let count = count_clone.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream; charset=utf-8")
+                    .body(Body::from("data: {\"type\": \"ping\"}\n\n"))
+                    .unwrap()
+            }
+        }),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+
+    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+
+    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+
+    let payload = serde_json::json!({
+        "model": "claude-3-opus",
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": "stream detection test"}]
+    });
+    let body_bytes = serde_json::to_vec(&payload).unwrap();
+
+    // Request 1: client did NOT set stream: true, but server returned text/event-stream
+    let req1 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-retoken-cache", "true")
+        .body(Body::from(body_bytes.clone()))
+        .unwrap();
+
+    let resp1 = app.clone().oneshot(req1).await.unwrap();
+    assert_eq!(resp1.status(), 200);
+    let ct = resp1
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(ct.contains("text/event-stream"));
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+    // Request 2: identical request must NOT hit cache because response was an event stream
+    let req2 = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-retoken-cache", "true")
+        .body(Body::from(body_bytes))
+        .unwrap();
+
+    let resp2 = app.oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), 200);
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        2,
+        "SSE responses must never be cached even if client did not explicitly set stream: true"
+    );
+}
+
+#[test]
+fn test_connect_time_ssrf_destination_pinning() {
+    use gateway::provider::resolve_and_verify_destination;
+
+    // Strict policy: loopback, private, and metadata IPs must be rejected
+    assert!(resolve_and_verify_destination("127.0.0.1", 80, false).is_err());
+    assert!(resolve_and_verify_destination("localhost", 80, false).is_err());
+    assert!(resolve_and_verify_destination("169.254.169.254", 80, false).is_err());
+    assert!(resolve_and_verify_destination("10.0.0.1", 443, false).is_err());
+    assert!(resolve_and_verify_destination("192.168.1.1", 443, false).is_err());
+    assert!(resolve_and_verify_destination("internal.corp", 443, false).is_err());
+
+    // Public IP literal passes and returns pinned SocketAddr
+    let res = resolve_and_verify_destination("1.1.1.1", 443, false);
+    assert!(res.is_ok());
+    let addr = res.unwrap().expect("IP literal must resolve to SocketAddr");
+    assert_eq!(addr.ip().to_string(), "1.1.1.1");
+    assert_eq!(addr.port(), 443);
+
+    // With allow_private = true (e.g. testing mode)
+    assert!(resolve_and_verify_destination("127.0.0.1", 80, true).is_ok());
+}

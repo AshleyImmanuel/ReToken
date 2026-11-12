@@ -8,16 +8,16 @@ pub mod init;
 pub mod stats;
 pub mod wrap;
 
-#[derive(Parser)]
+#[derive(Parser, Debug, PartialEq)]
 #[command(name = "retoken")]
 #[command(about = "ReToken Agent Runtime", long_about = None)]
-struct Cli {
+pub struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
+    pub command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
-enum Commands {
+#[derive(Subcommand, Debug, PartialEq)]
+pub enum Commands {
     /// Start the ReToken gateway proxy (default)
     Run,
     /// Analyze a repository for intelligence
@@ -41,10 +41,23 @@ enum Commands {
     Doctor,
     /// Display telemetry overview and runtime configuration
     Stats,
-    /// Inspect or clear local cache
+    /// Inspect, clear, or invalidate local cache
     Cache {
-        /// Action to perform: status, clear
-        action: Option<String>,
+        #[command(subcommand)]
+        command: Option<CacheCommands>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum CacheCommands {
+    /// Show cache status, hit ratios, and active entries (default)
+    Status,
+    /// Clear all cached responses from memory and persistent store
+    Clear,
+    /// Invalidate a specific cached entry by its key or hash
+    Invalidate {
+        /// The cache key to invalidate
+        key: String,
     },
 }
 
@@ -74,10 +87,60 @@ async fn main() -> anyhow::Result<()> {
         Commands::Stats => {
             stats::run_stats().await?;
         }
-        Commands::Cache { action } => {
-            cache_cmd::run_cache(action).await?;
+        Commands::Cache { command } => {
+            cache_cmd::run_cache(command).await?;
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_cache_subcommands_parsing() {
+        let cli_default = Cli::try_parse_from(["retoken", "cache"]).unwrap();
+        assert_eq!(cli_default.command, Some(Commands::Cache { command: None }));
+
+        let cli_status = Cli::try_parse_from(["retoken", "cache", "status"]).unwrap();
+        assert_eq!(
+            cli_status.command,
+            Some(Commands::Cache {
+                command: Some(CacheCommands::Status)
+            })
+        );
+
+        let cli_clear = Cli::try_parse_from(["retoken", "cache", "clear"]).unwrap();
+        assert_eq!(
+            cli_clear.command,
+            Some(Commands::Cache {
+                command: Some(CacheCommands::Clear)
+            })
+        );
+
+        let cli_inv =
+            Cli::try_parse_from(["retoken", "cache", "invalidate", "0123456789abcdef"]).unwrap();
+        assert_eq!(
+            cli_inv.command,
+            Some(Commands::Cache {
+                command: Some(CacheCommands::Invalidate {
+                    key: "0123456789abcdef".to_string()
+                })
+            })
+        );
+    }
+
+    #[test]
+    fn test_cli_wrap_parsing() {
+        let cli_wrap = Cli::try_parse_from(["retoken", "wrap", "claude", "--print"]).unwrap();
+        match cli_wrap.command.unwrap() {
+            Commands::Wrap { inject, command } => {
+                assert!(inject.is_empty());
+                assert_eq!(command, vec!["claude", "--print"]);
+            }
+            _ => panic!("Expected Wrap command"),
+        }
+    }
 }

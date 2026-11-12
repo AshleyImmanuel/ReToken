@@ -2,6 +2,34 @@
 
 ## Agent Contributions
 
+### Antigravity (2026-11-12 - Continued)
+* **Connect-Time SSRF Validation & Destination IP Pinning**:
+  * Implemented `resolve_and_verify_destination` in `gateway/src/provider.rs` and integrated destination resolution into `gateway/src/handler/mod.rs`.
+  * Configured `reqwest::Client::builder().resolve(host, verified_addr)` to pin connections directly to the verified socket destination, eliminating time-of-check to time-of-use (TOCTOU) DNS rebinding vulnerabilities between DNS pre-flight and connection time.
+* **Bounded Response Body Limits**:
+  * Added `max_response_body_bytes` to `AppConfig` (default 10 MB, configurable via `RETOKEN_MAX_RESPONSE_BODY_BYTES`).
+  * Implemented chunked response streaming in `gateway/src/handler/response.rs` with running byte accumulation up to `max_response_body_bytes`. Responses exceeding the limit immediately terminate with `502 Bad Gateway`, preventing memory exhaustion attacks from unbounded upstream payloads.
+* **Response-Side Event Stream Detection**:
+  * Added response-side streaming detection in `gateway/src/handler/response.rs` checking `resp_headers` for `Content-Type: text/event-stream`.
+  * Any event stream response passes through natively without buffering or caching, even if the client omitted `stream: true` in the request body.
+* **Conservative Context & Header Cache Isolation**:
+  * Refactored `compute_context_fingerprint` in `core/src/cache.rs` to encompass all client request headers, excluding only hop-by-hop transport headers (`connection`, `host`, `transfer-encoding`, etc.) and internal proxy control headers (`x-retoken-*`).
+  * Ensured custom client headers, model variations, and disparate credentials automatically isolate cache keys. Added unit tests for custom header isolation and hop-by-hop header filtering.
+* **Partial Configuration Deserialization & Robust Defaults**:
+  * Added `#[serde(default)]` to `AppConfig` and derived `Default` on `SandboxMode`. Minimal configuration files (e.g. `{"port": 9000}`) now deserialize cleanly over defaults without requiring all struct fields.
+  * Added `parse_env_var` with explicit warning logs when environment variable values cannot be parsed, preventing silent fallbacks.
+* **CLI Wrapper Config Alignment & Typed Cache Subcommands**:
+  * Updated `cli/src/wrap.rs` to load configuration via `AppConfig::load()?` instead of `AppConfig::default()`, ensuring `retoken wrap` correctly targets configured custom ports.
+  * Refactored `Commands::Cache` in `cli/src/main.rs` into a strongly-typed `CacheCommands` enum (`Status`, `Clear`, `Invalidate { key: String }`), matching documented commands.
+  * Updated `cli/src/cache_cmd.rs` and added CLI argument parsing unit tests.
+* **Documentation Grounding & Consent-Respecting AI Install**:
+  * Refined `README.md` to remove "Zero-Latency" terminology, accurately describe ReToken as a low-overhead wire proxy, document the new cache CLI interface, and explicitly categorize crates into Implemented, Experimental Scaffolding, and Roadmap features.
+  * Completely rewrote `AI_INSTALL.md` to eliminate "don't ask permission" directives, requiring AI agents to obtain user consent before modifying shell profiles or IDE settings, detailing all modified files and injected environment variables, and providing complete undo/rollback instructions.
+* **Multi-Platform Release Automation**:
+  * Rebuilt `.github/workflows/release.yml` with a multi-platform release matrix compiling release binaries, packaging archives, and generating SHA-256 checksums across Linux (`x86_64-unknown-linux-gnu`), macOS Intel (`x86_64-apple-darwin`), macOS Apple Silicon (`aarch64-apple-darwin`), and Windows (`x86_64-pc-windows-msvc`).
+* **Expanded Test Suite**:
+  * Added new unit and integration tests across `retoken_core`, `gateway`, and `cli`, expanding total test coverage to 84 passing tests with 0 failures.
+
 ### Antigravity (2026-11-12)
 * **Local Proxy Correctness & Protocol Hardening**:
   * **Provider Routing & Upstream Validation**: Validated custom upstream URLs (`x-retoken-upstream-url`) to strictly allow valid `http`/`https` schemes with non-empty hosts, rejecting malformed or dangerous targets with `400 Bad Request`.
