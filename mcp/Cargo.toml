@@ -1,0 +1,16 @@
+[package]
+name = "retoken_mcp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "retoken-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+rmcp = { version = "3.10.0", features = ["server", "transport-io"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

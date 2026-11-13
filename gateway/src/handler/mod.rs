@@ -20,6 +20,7 @@ use retoken_core::config::AppConfig;
 use retoken_core::recorder::FlightRecord;
 use retoken_core::state::StateEngine;
 
+use crate::block_reuse;
 use crate::bypass::forward_raw;
 use crate::optimizer;
 use crate::provider::{
@@ -166,12 +167,50 @@ pub async fn handler(
     }
 
     // Apply Optimizations: when all optimizations are disabled, preserve raw client bytes bit-for-bit
-    let optimizations_active = state.config.compression_enabled
-        || state.config.terse_mode
-        || ((detected_provider == Provider::Anthropic || detected_provider == Provider::OpenAI)
-            && state.config.prompt_caching_enabled);
+    // The Responses API carries structured tool and item payloads. Its upstream prompt
+    // caching works without rewriting the body, so preserve it byte-for-byte here.
+    let is_openai_responses =
+        detected_provider == Provider::OpenAI && is_openai_responses_endpoint(path_and_query);
+    let mut block_reuse_applied = false;
+    if state.config.block_reuse_enabled {
+        if let Some(ref mut body_json) = json_body {
+            let stats = block_reuse::reuse_exact_tool_outputs(body_json);
+            if stats.reused_blocks > 0 {
+                block_reuse_applied = true;
+                let reduced_size = original_size.saturating_sub(stats.bytes_saved);
+                if original_size > 0 {
+                    let ratio = 1.0 - (reduced_size as f64 / original_size as f64);
+                    record.context_reduction = Some(ratio);
+                    record.compression_ratio = Some(ratio);
+                }
+                record.block_reuse_blocks = stats.reused_blocks;
+                record.block_reuse_bytes_saved = stats.bytes_saved;
+                info!(
+                    "Exact block reuse saved {} bytes across {} duplicate tool outputs",
+                    stats.bytes_saved, stats.reused_blocks
+                );
+            }
+        }
+    }
 
-    let final_bytes = if optimizations_active {
+    let optimizations_active = block_reuse_applied
+        || (!is_openai_responses
+            && (state.config.compression_enabled
+                || state.config.terse_mode
+                || ((detected_provider == Provider::Anthropic
+                    || detected_provider == Provider::OpenAI)
+                    && state.config.prompt_caching_enabled)));
+
+    // Responses payloads remain byte-for-byte pass-through unless an exact
+    // duplicate block was actually folded. In that case, serialize only the
+    // already-validated block-reuse mutation; do not run unrelated prefix
+    // canonicalisation over the Responses protocol.
+    let final_bytes = if block_reuse_applied && is_openai_responses {
+        json_body
+            .as_ref()
+            .and_then(|body_json| serde_json::to_vec(body_json).ok())
+            .unwrap_or_else(|| bytes.to_vec())
+    } else if optimizations_active {
         if let Some(ref mut body_json) = json_body {
             optimizer::optimize_payload(
                 body_json,
@@ -210,7 +249,7 @@ pub async fn handler(
             || (n.eq_ignore_ascii_case("x-retoken-no-cache") && (v == "true" || v == "1"))
     });
 
-    // LLM generation endpoints (/messages, /chat/completions) require explicit opt-in to cache
+    // LLM generation endpoints (/messages, /chat/completions, /responses) require explicit opt-in to cache
     // to prevent returning stale model generations when temperature is omitted or implicit sampling occurs
     let is_generation = is_generation_endpoint(path_and_query);
     let allow_generation_cache = req_headers.iter().any(|(n, v)| {
@@ -562,10 +601,26 @@ pub async fn handler(
 
 /// Returns true if the request path targets an LLM completion/generation endpoint.
 pub fn is_generation_endpoint(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("/messages")
-        || lower.contains("/chat/completions")
-        || lower.contains("/completions")
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    matches!(
+        path.to_ascii_lowercase().as_str(),
+        "/v1/messages"
+            | "/messages"
+            | "/v1/chat/completions"
+            | "/chat/completions"
+            | "/v1/completions"
+            | "/completions"
+            | "/v1/responses"
+            | "/responses"
+    )
+}
+
+fn is_openai_responses_endpoint(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    matches!(
+        path.to_ascii_lowercase().as_str(),
+        "/v1/responses" | "/responses"
+    )
 }
 
 #[cfg(test)]
@@ -579,7 +634,10 @@ mod tests {
         assert!(is_generation_endpoint("/v1/chat/completions"));
         assert!(is_generation_endpoint("/chat/completions"));
         assert!(is_generation_endpoint("/v1/completions"));
+        assert!(is_generation_endpoint("/v1/responses"));
+        assert!(is_generation_endpoint("/v1/responses?stream=true"));
         assert!(!is_generation_endpoint("/v1/models"));
+        assert!(!is_generation_endpoint("/v1/responses/input_tokens"));
         assert!(!is_generation_endpoint("/v1/embeddings"));
         assert!(!is_generation_endpoint("/_retoken/stats"));
     }

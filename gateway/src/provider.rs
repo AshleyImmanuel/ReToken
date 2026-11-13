@@ -284,7 +284,7 @@ pub fn resolve_and_verify_destination(
 /// Detection strategy:
 ///   1. If `x-retoken-upstream-url` header is present -> Generic provider (validated)
 ///   2. If path contains `/v1/messages` or starts with `/messages` -> Anthropic (Claude API)
-///   3. If path contains `/v1/chat/completions` or starts with `/chat/completions` -> OpenAI
+///   3. If path targets OpenAI Chat Completions, Completions, or Responses -> OpenAI
 ///   4. If `x-api-key` header present -> Anthropic
 ///   5. If `Authorization: Bearer` header present -> OpenAI
 ///   6. Fallback to Anthropic
@@ -322,8 +322,10 @@ pub fn detect_provider(
     }
     if path.contains("/v1/chat/completions")
         || path.contains("/v1/completions")
+        || path.contains("/v1/responses")
         || path.starts_with("/chat/completions")
         || path.starts_with("/completions")
+        || path.starts_with("/responses")
     {
         return Ok(Provider::OpenAI);
     }
@@ -371,6 +373,7 @@ pub fn build_target_url(
         Provider::OpenAI => {
             if normalized_path.starts_with("/chat/completions")
                 || normalized_path.starts_with("/completions")
+                || normalized_path.starts_with("/responses")
                 || normalized_path.starts_with("/models")
             {
                 normalized_path = format!("/v1{}", normalized_path);
@@ -399,7 +402,13 @@ pub fn build_target_url(
     Ok(parsed.to_string())
 }
 
-/// Extracts token usage from a provider's response body.
+/// Extracts token usage from a provider response or terminal stream event.
+///
+/// OpenAI Responses places final usage at `response.usage` in its streamed
+/// `response.completed` event, while non-streaming responses and Anthropic
+/// events place it at the root. Keeping both shapes here gives the streaming
+/// relay one provider-aware parser without changing any response bytes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,
@@ -408,19 +417,21 @@ pub struct TokenUsage {
 }
 
 pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUsage {
-    let mut usage = TokenUsage {
-        input_tokens: None,
-        output_tokens: None,
-        cached_tokens: None,
-        reasoning_tokens: None,
-    };
-
     let json: serde_json::Value = match serde_json::from_slice(response_body) {
         Ok(v) => v,
-        Err(_) => return usage,
+        Err(_) => return TokenUsage::default(),
     };
 
-    let usage_obj = match json.get("usage") {
+    extract_token_usage_value(provider, &json)
+}
+
+pub fn extract_token_usage_value(provider: &Provider, json: &serde_json::Value) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+
+    let usage_obj = match json.get("usage").or_else(|| {
+        json.get("response")
+            .and_then(|response| response.get("usage"))
+    }) {
         Some(u) => u,
         None => return usage,
     };
@@ -449,20 +460,32 @@ pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUs
         Provider::OpenAI => {
             usage.input_tokens = usage_obj
                 .get("prompt_tokens")
+                .or_else(|| usage_obj.get("input_tokens"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             usage.output_tokens = usage_obj
                 .get("completion_tokens")
+                .or_else(|| usage_obj.get("output_tokens"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             usage.cached_tokens = usage_obj
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
+                .or_else(|| {
+                    usage_obj
+                        .get("input_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                })
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             usage.reasoning_tokens = usage_obj
                 .get("completion_tokens_details")
                 .and_then(|d| d.get("reasoning_tokens"))
+                .or_else(|| {
+                    usage_obj
+                        .get("output_tokens_details")
+                        .and_then(|d| d.get("reasoning_tokens"))
+                })
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
         }
@@ -600,6 +623,10 @@ mod tests {
         let p = detect_provider("/v1/chat/completions", &empty_headers, false, &[]).unwrap();
         assert_eq!(p, Provider::OpenAI);
 
+        // OpenAI Responses path (used by current Codex integrations)
+        let p = detect_provider("/v1/responses", &empty_headers, false, &[]).unwrap();
+        assert_eq!(p, Provider::OpenAI);
+
         // Anthropic header
         let anthropic_headers = vec![("x-api-key".into(), "secret".into())];
         let p = detect_provider("/custom", &anthropic_headers, false, &[]).unwrap();
@@ -703,6 +730,46 @@ mod tests {
         });
         let body = serde_json::to_vec(&response).unwrap();
         let usage = extract_token_usage(&Provider::OpenAI, &body);
+        assert_eq!(usage.input_tokens, Some(1500));
+        assert_eq!(usage.output_tokens, Some(800));
+        assert_eq!(usage.cached_tokens, Some(1024));
+        assert_eq!(usage.reasoning_tokens, Some(600));
+    }
+
+    #[test]
+    fn test_extract_token_usage_openai_responses_tokens() {
+        let response = serde_json::json!({
+            "id": "resp_123",
+            "usage": {
+                "input_tokens": 1500,
+                "output_tokens": 800,
+                "input_tokens_details": { "cached_tokens": 1024 },
+                "output_tokens_details": { "reasoning_tokens": 600 }
+            }
+        });
+        let body = serde_json::to_vec(&response).unwrap();
+        let usage = extract_token_usage(&Provider::OpenAI, &body);
+        assert_eq!(usage.input_tokens, Some(1500));
+        assert_eq!(usage.output_tokens, Some(800));
+        assert_eq!(usage.cached_tokens, Some(1024));
+        assert_eq!(usage.reasoning_tokens, Some(600));
+    }
+
+    #[test]
+    fn test_extract_token_usage_openai_stream_terminal_event() {
+        let event = serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "usage": {
+                    "input_tokens": 1500,
+                    "output_tokens": 800,
+                    "input_tokens_details": { "cached_tokens": 1024 },
+                    "output_tokens_details": { "reasoning_tokens": 600 }
+                }
+            }
+        });
+
+        let usage = extract_token_usage_value(&Provider::OpenAI, &event);
         assert_eq!(usage.input_tokens, Some(1500));
         assert_eq!(usage.output_tokens, Some(800));
         assert_eq!(usage.cached_tokens, Some(1024));

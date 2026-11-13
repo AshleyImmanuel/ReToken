@@ -11,6 +11,7 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+futures-util = { workspace = true }
 retrieval = { version = "0.1.0", path = "../retrieval" }
 analyzers = { version = "0.1.0", path = "../analyzers" }
 compressors = { version = "0.1.0", path = "../compressors" }

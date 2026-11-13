@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub compression_enabled: bool,
     /// Whether Contextual Compression and Retrieval (CCR) handle elision is enabled (default: false).
     pub ccr_enabled: bool,
+    /// Whether exact duplicate tool output in one request may be replaced by a pointer to its earlier full copy.
+    pub block_reuse_enabled: bool,
     /// Whether Anthropic prompt caching breakpoints and message reordering are injected (default: false for literal pass-through).
     pub prompt_caching_enabled: bool,
     pub port: u16,
@@ -79,6 +81,7 @@ impl Default for AppConfig {
             terse_mode: parse_env_var("RETOKEN_TERSE_MODE").unwrap_or(false),
             compression_enabled: parse_env_var("RETOKEN_COMPRESSION_ENABLED").unwrap_or(false),
             ccr_enabled: parse_env_var("RETOKEN_CCR_ENABLED").unwrap_or(false),
+            block_reuse_enabled: parse_env_var("RETOKEN_BLOCK_REUSE_ENABLED").unwrap_or(false),
             prompt_caching_enabled: parse_env_var("RETOKEN_PROMPT_CACHING_ENABLED")
                 .unwrap_or(false),
             port: parse_env_var("RETOKEN_PORT").unwrap_or(8888),
@@ -158,6 +161,9 @@ impl AppConfig {
         if let Some(v) = parse_env_var("RETOKEN_CCR_ENABLED") {
             self.ccr_enabled = v;
         }
+        if let Some(v) = parse_env_var("RETOKEN_BLOCK_REUSE_ENABLED") {
+            self.block_reuse_enabled = v;
+        }
         if let Some(v) = parse_env_var("RETOKEN_PROMPT_CACHING_ENABLED") {
             self.prompt_caching_enabled = v;
         }
@@ -221,6 +227,10 @@ mod tests {
         assert!(
             !config.ccr_enabled,
             "ccr_enabled must be false by default to avoid broken retrieval loops"
+        );
+        assert!(
+            !config.block_reuse_enabled,
+            "block reuse must require explicit opt-in"
         );
         assert!(
             !config.prompt_caching_enabled,

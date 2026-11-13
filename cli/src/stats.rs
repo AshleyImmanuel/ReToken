@@ -22,6 +22,7 @@ pub async fn run_stats() -> anyhow::Result<()> {
         config.compression_enabled
     );
     println!("  CCR Enabled: {}", config.ccr_enabled);
+    println!("  Exact Block Reuse: {}", config.block_reuse_enabled);
     println!(
         "  Prompt Caching: {} (literal pass-through default)",
         config.prompt_caching_enabled
@@ -80,6 +81,14 @@ pub async fn run_stats() -> anyhow::Result<()> {
                     .get("total_reasoning_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                let reused_blocks = json
+                    .get("total_block_reuse_blocks")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let reused_bytes = json
+                    .get("total_block_reuse_bytes_saved")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
 
                 let hits = json.get("total_hits").and_then(|v| v.as_u64()).unwrap_or(0);
                 let misses = json
@@ -128,6 +137,9 @@ pub async fn run_stats() -> anyhow::Result<()> {
                         reasoning_tokens
                     );
                 }
+                println!("  Exact Block Reuse:");
+                println!("    Duplicate Tool Blocks Folded: {}", reused_blocks);
+                println!("    Provider Bytes Avoided: {}", reused_bytes);
                 println!("  Response Cache:");
                 println!("    Active Entries: {} / {}", cached, max_cached);
                 println!("    Cache Hits: {}", hits);

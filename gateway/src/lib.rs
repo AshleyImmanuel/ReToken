@@ -10,6 +10,7 @@ use retoken_core::cache::ResponseCache;
 use retoken_core::config::AppConfig;
 use retoken_core::state::StateEngine;
 
+pub mod block_reuse;
 pub mod bypass;
 pub mod handler;
 pub mod interceptor;

@@ -95,6 +95,7 @@ pub async fn admin_stats(
             "cache_enabled": state.config.cache_enabled,
             "compression_enabled": state.config.compression_enabled,
             "ccr_enabled": state.config.ccr_enabled,
+            "block_reuse_enabled": state.config.block_reuse_enabled,
             "prompt_caching_enabled": state.config.prompt_caching_enabled,
             "terse_mode": state.config.terse_mode,
             "cached_entries": cache.len(),
@@ -110,6 +111,8 @@ pub async fn admin_stats(
             "total_output_tokens": tel.total_output_tokens,
             "total_cached_tokens": tel.total_cached_tokens,
             "total_reasoning_tokens": tel.total_reasoning_tokens,
+            "total_block_reuse_blocks": tel.total_block_reuse_blocks,
+            "total_block_reuse_bytes_saved": tel.total_block_reuse_bytes_saved,
         })),
     )
 }
