@@ -2,28 +2,45 @@ use axum::{routing::any, Router};
 use compressors::ccr::CcrStore;
 use reqwest::Client;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tracing::info;
 
 use retoken_core::cache::ResponseCache;
 use retoken_core::config::AppConfig;
-use retoken_core::state::StateEngine;
 
 pub mod bypass;
 pub mod handler;
+mod host_guard;
 pub mod interceptor;
 pub mod optimizer;
 pub mod provider;
+pub mod stream_usage;
 
 use handler::{handler as gateway_handler, GatewayState};
 
-pub fn app_with_client(
-    client: Client,
-    state_engine: Arc<Mutex<StateEngine>>,
-    config: AppConfig,
-    ccr_store: Arc<CcrStore>,
-) -> Router {
+/// Builds the single upstream HTTP client shared by all requests, so connections are pooled.
+///
+/// `upstream_timeout_secs` bounds connecting and each idle gap between body reads, not the
+/// whole request: a total timeout would cut off long-running streamed generations.
+/// Unless private upstreams are allowed, DNS resolution goes through [`provider::SsrfResolver`],
+/// which enforces the SSRF policy on the exact addresses that get dialed.
+pub fn build_upstream_client(config: &AppConfig) -> reqwest::Result<Client> {
+    let timeout = Duration::from_secs(config.upstream_timeout_secs);
+    let mut builder = Client::builder()
+        .connect_timeout(timeout)
+        .read_timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none());
+    if !config.allow_private_upstreams {
+        builder = builder.dns_resolver(Arc::new(provider::SsrfResolver));
+    }
+    builder.build()
+}
+
+/// Builds the gateway router for the given configuration and CCR store.
+pub fn app(config: AppConfig, ccr_store: Arc<CcrStore>) -> anyhow::Result<Router> {
+    let client = build_upstream_client(&config)?;
     let response_cache = Arc::new(Mutex::new(ResponseCache::new(
         config.cache_ttl_secs,
         config.max_cache_entries,
@@ -33,7 +50,6 @@ pub fn app_with_client(
 
     let state = Arc::new(GatewayState {
         client,
-        state_engine,
         response_cache,
         config,
         ccr_store,
@@ -41,7 +57,7 @@ pub fn app_with_client(
         telemetry,
     });
 
-    Router::new()
+    Ok(Router::new()
         .route(
             "/_retoken/cache/clear",
             axum::routing::post(handler::admin::admin_cache_clear),
@@ -57,34 +73,30 @@ pub fn app_with_client(
         )
         .route("/*path", any(gateway_handler))
         .route("/", any(gateway_handler))
-        .with_state(state)
+        .layer(axum::middleware::from_fn(host_guard::require_loopback_host))
+        .with_state(state))
 }
 
-pub fn app(state_engine: Arc<Mutex<StateEngine>>, config: AppConfig) -> Router {
+/// CCR originals older than this are purged at startup. Entries are content-addressed, so any
+/// still referenced by a live conversation are re-stored the next time it is compressed.
+const CCR_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+pub async fn start(config: AppConfig) -> anyhow::Result<()> {
+    let addr = format!("127.0.0.1:{}", config.port);
     let ccr_store = match CcrStore::open(None) {
-        Ok(store) => Arc::new(store),
+        Ok(store) => {
+            store.gc(CCR_MAX_AGE_SECS);
+            Arc::new(store)
+        }
         Err(e) => {
             tracing::warn!(
                 "Failed to open persistent CCR store: {}. Falling back to in-memory store.",
                 e
             );
-            Arc::new(CcrStore::open_in_memory().expect("in-memory CCR store must not fail"))
+            Arc::new(CcrStore::open_in_memory().map_err(anyhow::Error::msg)?)
         }
     };
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.upstream_timeout_secs))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    app_with_client(client, state_engine, config, ccr_store)
-}
-
-pub async fn start(config: AppConfig) -> anyhow::Result<()> {
-    let addr = format!("127.0.0.1:{}", config.port);
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
-    let app = app(state_engine, config);
+    let app = app(config, ccr_store)?;
 
     let listener = TcpListener::bind(&addr).await?;
     info!("ReToken Gateway listening on {}", addr);

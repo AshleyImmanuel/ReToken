@@ -9,12 +9,10 @@ use http_body_util::BodyExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 use compressors::ccr::CcrStore;
 use retoken_core::config::AppConfig;
-use retoken_core::state::StateEngine;
 
 /// Starts a mock upstream server on an ephemeral port.
 async fn start_mock_upstream() -> (String, Arc<AtomicUsize>) {
@@ -123,7 +121,6 @@ async fn start_mock_upstream() -> (String, Arc<AtomicUsize>) {
 }
 
 fn create_test_gateway(upstream_base: &str) -> Router {
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_base.to_string();
@@ -132,7 +129,7 @@ fn create_test_gateway(upstream_base: &str) -> Router {
     config.terse_mode = true;
     config.allow_private_upstreams = true; // allow mock upstream on 127.0.0.1 in tests
 
-    gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store)
+    gateway::app(config, ccr_store).unwrap()
 }
 
 #[tokio::test]
@@ -350,13 +347,12 @@ async fn test_bypass_mode_header_preservation() {
 async fn test_ssrf_protection_blocks_private_and_metadata_ips() {
     let (upstream_url, _) = start_mock_upstream().await;
     // Create gateway with strict SSRF policy (allow_private_upstreams = false)
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url.clone();
     config.allow_private_upstreams = false; // strict default
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     // 1. Loopback IP rejected
     let req1 = Request::builder()
@@ -395,13 +391,12 @@ async fn test_ssrf_protection_blocks_private_and_metadata_ips() {
 #[tokio::test]
 async fn test_request_body_size_limit_rejection() {
     let (upstream_url, _) = start_mock_upstream().await;
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.max_request_body_bytes = 100; // tiny 100-byte limit
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     // Oversized body (500 bytes > 100 limit)
     let oversized = vec![b'a'; 500];
@@ -491,13 +486,12 @@ async fn test_cache_credential_isolation_and_no_cache_opt_out() {
 #[tokio::test]
 async fn test_upstream_allowlist_enforcement() {
     let (upstream_url, _) = start_mock_upstream().await;
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allowed_upstream_hosts = vec!["api.anthropic.com".into(), "*.trusted.com".into()];
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     // Host not in allowlist rejected
     let req = Request::builder()
@@ -798,14 +792,13 @@ async fn test_response_body_size_limit_rejection() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allow_private_upstreams = true;
     config.max_response_body_bytes = 100; // 100-byte max limit
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let req = Request::builder()
         .method("POST")
@@ -845,13 +838,12 @@ async fn test_response_side_stream_detection_bypasses_cache() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allow_private_upstreams = true;
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let payload = serde_json::json!({
         "model": "claude-3-opus",
@@ -899,26 +891,193 @@ async fn test_response_side_stream_detection_bypasses_cache() {
 }
 
 #[test]
-fn test_connect_time_ssrf_destination_pinning() {
-    use gateway::provider::resolve_and_verify_destination;
+fn test_ssrf_destination_checks() {
+    use gateway::provider::{check_destination_host, verify_resolved_addrs};
+    use std::net::SocketAddr;
 
-    // Strict policy: loopback, private, and metadata IPs must be rejected
-    assert!(resolve_and_verify_destination("127.0.0.1", 80, false).is_err());
-    assert!(resolve_and_verify_destination("localhost", 80, false).is_err());
-    assert!(resolve_and_verify_destination("169.254.169.254", 80, false).is_err());
-    assert!(resolve_and_verify_destination("10.0.0.1", 443, false).is_err());
-    assert!(resolve_and_verify_destination("192.168.1.1", 443, false).is_err());
-    assert!(resolve_and_verify_destination("internal.corp", 443, false).is_err());
+    // Static (no-DNS) policy: loopback, private, metadata IPs and internal names rejected
+    for host in [
+        "127.0.0.1",
+        "localhost",
+        "169.254.169.254",
+        "10.0.0.1",
+        "192.168.1.1",
+        "internal.corp",
+        "[::1]",
+    ] {
+        assert!(
+            check_destination_host(host).is_err(),
+            "{host} must be blocked"
+        );
+    }
+    assert!(check_destination_host("1.1.1.1").is_ok());
+    assert!(check_destination_host("api.anthropic.com").is_ok());
 
-    // Public IP literal passes and returns pinned SocketAddr
-    let res = resolve_and_verify_destination("1.1.1.1", 443, false);
-    assert!(res.is_ok());
-    let addr = res.unwrap().expect("IP literal must resolve to SocketAddr");
-    assert_eq!(addr.ip().to_string(), "1.1.1.1");
-    assert_eq!(addr.port(), 443);
+    // Resolved-address policy: any private address rejects the host; empty resolution rejects
+    let public: SocketAddr = "1.1.1.1:0".parse().unwrap();
+    let private: SocketAddr = "10.1.2.3:0".parse().unwrap();
+    assert!(verify_resolved_addrs("example.com", &[public]).is_ok());
+    assert!(verify_resolved_addrs("rebind.example", &[public, private]).is_err());
+    assert!(verify_resolved_addrs("empty.example", &[]).is_err());
+}
 
-    // With allow_private = true (e.g. testing mode)
-    assert!(resolve_and_verify_destination("127.0.0.1", 80, true).is_ok());
+#[tokio::test]
+async fn test_ssrf_resolver_rejection_is_recognized_through_reqwest_errors() {
+    use gateway::provider::{is_ssrf_block, SsrfBlocked};
+
+    struct AlwaysBlocked;
+    impl reqwest::dns::Resolve for AlwaysBlocked {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(async { Err(Box::new(SsrfBlocked("blocked".into())) as _) })
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .dns_resolver(Arc::new(AlwaysBlocked))
+        .build()
+        .unwrap();
+    let err = client
+        .get("http://blocked.example/")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        is_ssrf_block(&err),
+        "resolver SSRF rejection must survive error wrapping: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_ssrf_blocks_private_configured_base_url_with_403() {
+    let (upstream_url, count) = start_mock_upstream().await;
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url; // 127.0.0.1
+    config.allow_private_upstreams = false;
+    let app = gateway::app(config, ccr_store).unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"m","messages":[]}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "blocked request must not reach upstream"
+    );
+}
+
+/// Starts an upstream that streams `chunks` as SSE with `gap` between them.
+async fn start_slow_sse_upstream(chunks: Vec<String>, gap: std::time::Duration) -> String {
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move |_req: Request<Body>| {
+            let chunks = chunks.clone();
+            async move {
+                let stream = futures_util::stream::unfold(0usize, move |i| {
+                    let chunks = chunks.clone();
+                    async move {
+                        if i >= chunks.len() {
+                            return None;
+                        }
+                        if i > 0 {
+                            tokio::time::sleep(gap).await;
+                        }
+                        Some((
+                            Ok::<_, std::io::Error>(axum::body::Bytes::from(chunks[i].clone())),
+                            i + 1,
+                        ))
+                    }
+                });
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from_stream(stream))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    addr
+}
+
+fn streaming_request() -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"model":"m","stream":true,"messages":[]}"#))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_stream_longer_than_timeout_is_not_truncated() {
+    // Total stream time (~2.4s) exceeds the 1s timeout, but every idle gap (0.6s) is below it.
+    let chunks: Vec<String> = (0..5)
+        .map(|i| format!("data: {{\"chunk\":{i}}}\n\n"))
+        .collect();
+    let upstream =
+        start_slow_sse_upstream(chunks.clone(), std::time::Duration::from_millis(600)).await;
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream;
+    config.allow_private_upstreams = true;
+    config.upstream_timeout_secs = 1;
+    let app = gateway::app(config, ccr_store).unwrap();
+
+    let resp = app.oneshot(streaming_request()).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("stream must complete")
+        .to_bytes();
+    assert_eq!(String::from_utf8(body.to_vec()).unwrap(), chunks.concat());
+}
+
+#[tokio::test]
+async fn test_stream_token_usage_is_recorded_in_stats() {
+    let chunks = vec![
+        "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":420,\"output_tokens\":1}}}\n\n".to_string(),
+        "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":57}}\n\n".to_string(),
+    ];
+    let upstream = start_slow_sse_upstream(chunks, std::time::Duration::from_millis(10)).await;
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream;
+    config.allow_private_upstreams = true;
+    let app = gateway::app(config, ccr_store).unwrap();
+
+    let resp = app.clone().oneshot(streaming_request()).await.unwrap();
+    resp.into_body().collect().await.unwrap();
+
+    // Telemetry is recorded when the stream is dropped; give the spawned task time to run.
+    let mut stats = serde_json::Value::Null;
+    for _ in 0..50 {
+        let req = Request::builder()
+            .uri("/_retoken/stats")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        stats = serde_json::from_slice(&bytes).unwrap();
+        if stats["total_requests"] == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(stats["total_requests"], 1);
+    assert_eq!(stats["total_input_tokens"], 420);
+    assert_eq!(stats["total_output_tokens"], 57);
 }
 
 #[tokio::test]
@@ -954,14 +1113,13 @@ async fn test_default_preserves_comments_and_prose_losslessly() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allow_private_upstreams = true;
     // Default config has terse_mode = false, compression_enabled = false, ccr_enabled = false
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let code_with_comments = r#"```rust
 // Security constraint: must validate caller permissions
@@ -1013,13 +1171,12 @@ fn process_payment(user: &User) {
     // Middle lines must NOT be elided
     assert!(forwarded_str.contains("// Line 7"));
     // Terse persona must NOT be injected by default
-    assert!(!forwarded_str.contains("ReToken Terse Mode"));
-    assert!(!forwarded_str.contains("Caveman"));
-    // Literal pass-through: prompt caching breakpoint must NOT be injected by default
-    assert!(!forwarded_str.contains("cache_control"));
-    // Forwarded bytes must match the exact original request bytes bit-for-bit
-    let original_bytes = serde_json::to_vec(&payload).unwrap();
-    assert_eq!(forwarded_bytes, original_bytes);
+    assert!(!forwarded_str.contains("ReToken terse mode"));
+    // Prompt caching is on by default: a breakpoint is added, but the user's text is unchanged
+    let forwarded: serde_json::Value = serde_json::from_slice(&forwarded_bytes).unwrap();
+    let block = &forwarded["messages"][0]["content"][0];
+    assert_eq!(block["cache_control"]["type"], "ephemeral");
+    assert_eq!(block["text"], payload["messages"][0]["content"]);
 }
 
 #[tokio::test]
@@ -1055,14 +1212,13 @@ async fn test_opt_in_prompt_caching_injects_breakpoints() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allow_private_upstreams = true;
     config.prompt_caching_enabled = true; // Opt-in to prompt caching
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let payload = serde_json::json!({
         "model": "claude-3-opus",
@@ -1173,13 +1329,12 @@ async fn test_live_ccr_multi_turn_flow() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allow_private_upstreams = true;
     config.ccr_enabled = true; // Enable live CCR multi-turn resolution
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let payload = serde_json::json!({
         "model": "claude-3-opus",
@@ -1248,14 +1403,13 @@ async fn test_compression_enabled_preserves_comments_in_tool_output() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allow_private_upstreams = true;
     config.compression_enabled = true; // Explicitly enable compression
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let code_with_comments = r#"```rust
 // CRITICAL_LOGIC_NOTE: must check caller permissions before withdrawal
@@ -1340,14 +1494,13 @@ async fn test_openai_codex_prefix_caching_canonicalization() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.openai_base_url = upstream_url;
     config.allow_private_upstreams = true;
     config.prompt_caching_enabled = true; // Enable prefix optimization
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let payload = serde_json::json!({
         "model": "gpt-4o",
@@ -1483,13 +1636,12 @@ async fn test_ccr_follow_up_strips_internal_retoken_headers() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allow_private_upstreams = true;
     config.ccr_enabled = true;
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let payload = serde_json::json!({
         "model": "claude-3-5-sonnet",
@@ -1552,7 +1704,6 @@ async fn test_ccr_initial_response_body_limit_rejection() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
@@ -1560,7 +1711,7 @@ async fn test_ccr_initial_response_body_limit_rejection() {
     config.ccr_enabled = true;
     config.max_response_body_bytes = 200; // 200 bytes max limit
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let payload = serde_json::json!({
         "model": "claude-3-opus",
@@ -1643,14 +1794,13 @@ async fn test_ccr_follow_up_body_limit_rejection() {
         axum::serve(listener, app_mock).await.unwrap();
     });
 
-    let state_engine = Arc::new(Mutex::new(StateEngine::new()));
     let mut config = AppConfig::default();
     config.anthropic_base_url = upstream_url;
     config.allow_private_upstreams = true;
     config.ccr_enabled = true;
     config.max_response_body_bytes = 300; // 300 bytes max limit
 
-    let app = gateway::app_with_client(reqwest::Client::new(), state_engine, config, ccr_store);
+    let app = gateway::app(config, ccr_store).unwrap();
 
     let payload = serde_json::json!({
         "model": "claude-3-opus",
@@ -1667,4 +1817,257 @@ async fn test_ccr_follow_up_body_limit_rejection() {
     let resp = app.oneshot(req).await.unwrap();
     // Exceeding response size in follow-up must return 502 Bad Gateway
     assert_eq!(resp.status(), 502);
+}
+
+#[tokio::test]
+async fn test_streaming_request_with_client_retrieve_tool_elides_logs_not_files() {
+    let captured = Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null));
+    let cap = captured.clone();
+    let upstream = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let cap = cap.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *cap.lock().await = serde_json::from_slice(&bytes).unwrap();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.compression_enabled = true;
+    let app = gateway::app(config, ccr_store.clone()).unwrap();
+
+    let file: String = (0..200).map(|i| format!("    let x{i} = {i};\n")).collect();
+    let mut log: String = (0..400)
+        .map(|i| format!("   Compiling dep_{i} v0.1.0\n"))
+        .collect();
+    log.push_str("error[E0425]: cannot find value `y`\n");
+    let body = serde_json::json!({
+        "model": "claude-x",
+        "stream": true,
+        "tools": [
+            {"name": "Read", "input_schema": {"type": "object"}},
+            {"name": "Bash", "input_schema": {"type": "object"}},
+            {"name": "mcp__retoken__retoken_retrieve", "input_schema": {"type": "object"}}
+        ],
+        "messages": [
+            {"role": "user", "content": "fix the build"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "src/lib.rs"}},
+                {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "cargo build"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": file.clone()},
+                {"type": "tool_result", "tool_use_id": "t2", "content": log.clone()}
+            ]}
+        ]
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.into_body().collect().await.unwrap();
+
+    let sent = captured.lock().await.clone();
+    let results = &sent["messages"][2]["content"];
+    assert_eq!(
+        results[0]["content"], file,
+        "file read must be forwarded verbatim"
+    );
+    let sent_log = results[1]["content"].as_str().unwrap();
+    assert!(
+        sent_log.len() < log.len() / 5,
+        "log must be elided on a streaming request"
+    );
+    assert!(sent_log.contains("error[E0425]"));
+    assert!(sent_log.contains("mcp__retoken__retoken_retrieve"));
+    let handle = compressors::ccr::CcrStore::handle(log.as_bytes());
+    assert_eq!(
+        ccr_store.retrieve(&handle).unwrap().unwrap(),
+        log.as_bytes()
+    );
+    // The proxy must not inject its own tool when the client provides one.
+    let tools = sent["tools"].as_array().unwrap();
+    assert!(!tools.iter().any(|t| t["name"] == "retoken_retrieve"));
+}
+
+#[tokio::test]
+async fn test_rewritten_request_preserves_client_key_order() {
+    let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let cap = captured.clone();
+    let upstream = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let cap = cap.clone();
+            async move {
+                *cap.lock().await = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.anthropic_base_url = upstream_url;
+    config.allow_private_upstreams = true;
+    config.compression_enabled = true;
+    config.prompt_caching_enabled = true;
+    let app = gateway::app(config, ccr_store).unwrap();
+
+    // Keys deliberately out of alphabetical order, as clients send them.
+    let raw = r#"{"model":"m","metadata":{"trace_id":123456789012345678901234567890,"ratio":0.1000000000000000055511151231257827},"tools":[{"name":"t","input_schema":{"type":"object","properties":{"zeta":{"type":"string"},"alpha":{"type":"string"}}}}],"messages":[{"role":"user","content":"hi"}]}"#;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(raw))
+        .unwrap();
+    app.oneshot(req).await.unwrap();
+
+    let sent = String::from_utf8(captured.lock().await.clone()).unwrap();
+    assert!(sent.find("\"zeta\"").unwrap() < sent.find("\"alpha\"").unwrap());
+    assert!(sent.find("\"model\"").unwrap() < sent.find("\"tools\"").unwrap());
+    assert!(
+        sent.contains("cache_control"),
+        "request was actually rewritten"
+    );
+    // Numbers pass through exactly, not rounded through f64.
+    assert!(sent.contains("123456789012345678901234567890"));
+    assert!(sent.contains("0.1000000000000000055511151231257827"));
+}
+
+#[tokio::test]
+async fn test_rebinding_hosts_are_rejected() {
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let app = gateway::app(AppConfig::default(), ccr_store).unwrap();
+
+    let stats = |host: &str| {
+        Request::builder()
+            .uri("/_retoken/stats")
+            .header("host", host)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let resp = app
+        .clone()
+        .oneshot(stats("evil.example:8888"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let resp = app.clone().oneshot(stats("127.0.0.1:8888")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = app.oneshot(stats("localhost:8888")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_generic_anthropic_format_upstream_gets_anthropic_handling() {
+    let captured = Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null));
+    let cap = captured.clone();
+    let upstream = Router::new().route(
+        "/zen/v1/messages",
+        post(move |req: Request<Body>| {
+            let cap = cap.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *cap.lock().await = serde_json::from_slice(&bytes).unwrap();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!(
+        "http://127.0.0.1:{}/zen",
+        listener.local_addr().unwrap().port()
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let mut config = AppConfig::default();
+    config.allow_private_upstreams = true;
+    config.terse_mode = true;
+    let app = gateway::app(config, ccr_store).unwrap();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .header("x-retoken-upstream-url", upstream_url)
+        .body(Body::from(
+            r#"{"model":"claude-x","system":"be helpful","messages":[{"role":"user","content":"hi"}]}"#,
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let sent = captured.lock().await.clone();
+    // Persona goes into top-level system, never as a `role: system` message (Anthropic 400s on that).
+    assert!(sent["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| m["role"] != "system"));
+    assert!(sent["system"].to_string().contains("ReToken terse mode"));
+    // Anthropic cache breakpoints applied to a generic Anthropic-format upstream.
+    assert_eq!(
+        sent["messages"][0]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+}
+
+#[test]
+fn test_accept_encoding_is_not_forwarded() {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("accept-encoding", "gzip, br, zstd".parse().unwrap());
+    headers.insert("x-api-key", "k".parse().unwrap());
+    headers.insert("x-retoken-cache", "true".parse().unwrap());
+    let out = gateway::provider::forwardable_request_headers(&headers);
+    assert!(
+        out.get("accept-encoding").is_none(),
+        "gateway must receive uncompressed bodies"
+    );
+    assert!(out.get("x-retoken-cache").is_none());
+    assert_eq!(out.get("x-api-key").unwrap(), "k");
 }

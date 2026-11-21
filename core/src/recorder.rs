@@ -17,6 +17,9 @@ pub struct FlightRecord {
     pub cache_misses: usize,
     pub compression_ratio: Option<f64>,
     pub context_reduction: Option<f64>,
+    /// Request bytes removed by ReToken's optimizations before forwarding.
+    #[serde(default)]
+    pub bytes_saved: usize,
     pub errors: usize,
     pub final_success: Option<bool>,
 }
@@ -39,6 +42,7 @@ impl Default for FlightRecord {
             cache_misses: 0,
             compression_ratio: None,
             context_reduction: None,
+            bytes_saved: 0,
             errors: 0,
             final_success: None,
         }
@@ -51,6 +55,8 @@ pub struct FlightTelemetry {
     pub total_requests: u64,
     pub total_errors: u64,
     pub total_bytes_transferred: u64,
+    #[serde(default)]
+    pub total_bytes_saved: u64,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cached_tokens: u64,
@@ -68,6 +74,7 @@ impl FlightTelemetry {
         self.total_requests += 1;
         self.total_errors += record.errors as u64;
         self.total_bytes_transferred += record.request_size as u64;
+        self.total_bytes_saved += record.bytes_saved as u64;
         if let Some(tokens) = record.input_tokens {
             self.total_input_tokens += tokens as u64;
         }

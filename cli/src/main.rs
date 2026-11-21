@@ -5,6 +5,7 @@ pub mod analyze;
 pub mod cache_cmd;
 pub mod doctor;
 pub mod init;
+pub mod mcp;
 pub mod stats;
 pub mod wrap;
 
@@ -46,6 +47,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<CacheCommands>,
     },
+    /// Serve the `retoken_retrieve` tool over MCP (stdio) so agents can recover elided output
+    Mcp,
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
@@ -63,10 +66,15 @@ pub enum CacheCommands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    telemetry::init_tracing();
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Commands::Run);
 
-    match cli.command.unwrap_or(Commands::Run) {
+    // MCP speaks JSON-RPC on stdout; log output there would corrupt the protocol.
+    if command != Commands::Mcp {
+        telemetry::init_tracing();
+    }
+
+    match command {
         Commands::Run => {
             tracing::info!("ReToken Agent Flight Recorder starting...");
             let config = retoken_core::config::AppConfig::load()?;
@@ -89,6 +97,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Cache { command } => {
             cache_cmd::run_cache(command).await?;
+        }
+        Commands::Mcp => {
+            mcp::run_mcp()?;
         }
     }
 

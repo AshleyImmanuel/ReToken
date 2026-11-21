@@ -10,12 +10,13 @@
 
 ## Core Features (MVP)
 
-- **Literal Pass-Through Default with Quality Preservation**: User prompts, system instructions, assistant reasoning history, tool definitions, and code comments are strictly preserved bit-for-bit. Request compression (`compression_enabled`), terse mode (`terse_mode`), Anthropic prompt cache injection (`prompt_caching_enabled`), and CCR (`ccr_enabled`) are all disabled by default, ensuring incoming requests and provider responses pass through untouched unless explicitly opted in.
+- **Lossless by Default, Savings On by Default**: User prompts, system instructions, assistant reasoning history, tool definitions, and code comments are never altered. Out of the box ReToken removes exact-duplicate tool output (lossless: the first copy stays in the conversation) and adds Anthropic prompt cache breakpoints, including a rolling breakpoint on the conversation tail, so repeated history is billed at the cached rate. Rewritten requests keep the client's JSON key order. Lossy elision only happens when your agent exposes the `retoken mcp` retrieval tool. Terse mode (`terse_mode`) and proxy-side CCR replay (`ccr_enabled`) stay opt-in; set `compression_enabled: false` and `prompt_caching_enabled: false` for literal pass-through.
 - **Zero-Tradeoff Prefix Optimization for OpenAI/Codex & Anthropic**: When `prompt_caching_enabled` is active, ReToken canonicalizes requests strictly losslessly: sorting OpenAI/Codex tools deterministically by function name and stabilizing system messages at index 0 (triggering automatic 50% discount prefix caching on `gpt-4o`/Codex), and placing ephemeral breakpoints on Anthropic (triggering 90% discount prompt caching). Zero code or text tokens are discarded.
 - **Exact-Hash Response Caching**: Hashes full request context (HTTP method, endpoint path, provider name, upstream URL, request payload, repo hash, and non-transport headers) to serve duplicate requests instantly with configurable TTL and LRU eviction.
 - **Dual Limit Cache Memory Protection**: Cache is constrained by both entry count (`max_cache_entries`, default 1024) and total memory budget (`max_cache_bytes`, default 256MB), preventing memory exhaustion.
 - **Connect-Time SSRF Validation & IP Pinning**: Enforces strict destination safety for custom upstreams, blocking loopback, private subnets, carrier-grade NAT, benchmark subnets, and cloud metadata. Pins verified socket destinations at connection time to eliminate TOCTOU DNS rebinding risks.
 - **Bounded Request & Response Buffering**: Caches and buffers are bounded by configurable byte limits (`max_request_body_bytes` and `max_response_body_bytes`, default 10MB each), protecting against memory exhaustion.
+- **Tool-Output Compression That Works With Streaming Agents** (`compression_enabled`): Exact repeats of earlier tool output are replaced losslessly. With the `retoken mcp` retrieval server registered in your agent, large build/test/log output and uniform JSON arrays are also elided (errors, failure details, and test summaries are always kept), and **file reads are progressive**: the model sees a file in full on the turn it reads it, and from the next turn on, large code reads shrink to an outline (signatures, types, exact line numbers) with a handle to the original. Searches and git output are never elided. Each tool result changes at most once, so provider prompt caching keeps working.
 - **Dual Request/Response Streaming Detection**: Automatically bypasses caching and buffering when `stream: true` is requested or when upstream returns `Content-Type: text/event-stream`.
 - **Partial Configuration with Serde Defaults**: Supports minimal config files (e.g. `{"port": 9000}`) with explicit warning reports on invalid environment variables.
 
@@ -26,7 +27,7 @@
 > [!WARNING]
 > **Project Maturity**: ReToken is an **early production candidate / serious prototype**, not mature enterprise LLM proxy infrastructure.
 >
-> 1. **Default Lossless Operation**: In default configuration (`compression_enabled: false`, `ccr_enabled: false`, `terse_mode: false`, `prompt_caching_enabled: false`), ReToken acts as a strictly lossless, bit-for-bit transparent pass-through proxy with connection-time SSRF pinning, request/response memory limits, and exact-hash caching for idempotent endpoints.
+> 1. **Default Lossless Operation**: In default configuration (`compression_enabled: true`, `prompt_caching_enabled: true`, `ccr_enabled: false`, `terse_mode: false`), ReToken never changes what the model reads beyond replacing exact repeats of earlier tool output with a reference, and adds cache breakpoints. Set both flags to `false` for a bit-for-bit transparent pass-through.
 > 2. **Stateful Replay in CCR**: The live CCR engine dispatches protocol-compliant `tool_result` turns back to the provider when the model invokes `retoken_retrieve`. However, stateful request replay across a transparent HTTP proxy is an advanced pattern that has not been battle-tested against high-volume production Anthropic traffic under real-world edge cases (e.g. concurrent tool execution, aggressive rate limits, stream conversion).
 > 3. **Non-Trivial Behavior Modifications**: Opting into `compression_enabled`, `ccr_enabled`, or `terse_mode` actively modifies prompt structures, elides repetitive tool outputs, or instructs the model toward extreme brevity. Keep these flags disabled if model answer richness and exact prompt preservation are required.
 
@@ -72,6 +73,22 @@ retoken wrap claude
 retoken wrap aider
 ```
 
+### Recovering Elided Output (MCP)
+
+Register the retrieval server so ReToken can elide large command output on streaming requests (Claude Code, opencode, Cursor all stream):
+
+```bash
+# Claude Code
+claude mcp add retoken -- retoken mcp
+```
+
+```jsonc
+// opencode (opencode.jsonc)
+"mcp": { "retoken": { "type": "local", "command": ["retoken", "mcp"] } }
+```
+
+ReToken detects the `*retoken_retrieve` tool in each request. Without it, only lossless compression is applied.
+
 ### Auto-Installation via AI
 
 To configure via an AI agent (Claude Code, Aider, RooCode):
@@ -104,6 +121,7 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 | `retoken cache clear` | Implemented | Purges live in-memory response cache and persistent CCR storage. |
 | `retoken cache invalidate <key>` | Implemented | Invalidates a specific cached response entry by key. |
 | `retoken analyze [path]` | Implemented | Comment-aware symbol scanner and dependency graph resolution (Rust, Python, TS/JS). |
+| `retoken mcp` | Implemented | Serves `retoken_retrieve` over MCP (stdio) so agents can fetch elided originals, optionally filtered by `pattern` or a line range. |
 | `retoken init` | Implemented | Injects ReToken agent guidance skills into `.claudecode` and `.gemini`. |
 | `retoken trace` | Roadmap | Per-request payload inspection and CCR handle resolution tracking. |
 | `retoken benchmark` | Roadmap | End-to-end compression ratio and latency benchmarking against standardized workloads. |
@@ -127,7 +145,7 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 ## Architecture Overview
 
 - **`gateway` (Implemented)**: The core `axum` HTTP wire proxy handling incoming requests, provider routing, URL normalization, cache lookups, admin endpoints, and response processing.
-- **`compressors` (Implemented)**: Heuristic parsers for log slicing, JSON array collapsing with MAD anomaly detection, base64 roundtripping, and content-addressed CCR storage.
+- **`compressors` (Implemented)**: Tool-output compression (provenance-aware dedup and elision), log slicing, JSON array collapsing with MAD anomaly detection, and the content-addressed CCR store.
 - **`core` (Implemented)**: Configuration (`AppConfig`), exact response caching (`ResponseCache`), in-memory session state tracking (`StateEngine`), flight recorder (`FlightRecord`), and process-level telemetry accumulator (`FlightTelemetry`).
 - **`analyzers` (Implemented)**: Comment-aware symbol scanner and module/symbol dependency graph resolution (relative paths, stem matching, exported symbols).
 - **`retrieval` (Experimental Scaffold)**: Context budgeting (`ContextPackage`), dependency-aware ranking (`ContextPlanner`), and cache breakpoint formatting (`packer`).

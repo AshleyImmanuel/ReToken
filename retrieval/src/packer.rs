@@ -44,70 +44,100 @@ pub fn reorder_for_cache(request_body: &mut Value) {
     }
 }
 
-/// Injects an Anthropic-compliant prompt caching breakpoint (`cache_control: {"type": "ephemeral"}`).
+/// Injects Anthropic prompt caching breakpoints (`cache_control: {"type": "ephemeral"}`).
+///
+/// 1. A rolling breakpoint on the last content block of the last message. Anthropic caches the
+///    whole prefix up to a breakpoint (tools, system, and the full conversation history), and
+///    on the next turn finds that prefix again via its lookback, so agent loops pay the cached
+///    rate for everything but the newest turn.
+/// 2. A breakpoint on the system prompt, which stays valid even when the history changes.
+///
+/// Existing client breakpoints are respected: nothing is added beyond Anthropic's limit of 4,
+/// and a message that already carries a breakpoint is left alone.
 ///
 /// In Anthropic's API, `cache_control` MUST be placed on a content block (inside `system` or inside
 /// a `messages` content array), NEVER directly as a root attribute of a message object.
 pub fn inject_cache_breakpoint(request_body: &mut Value) {
-    let ephemeral_marker = serde_json::json!({"type": "ephemeral"});
+    let mut budget =
+        MAX_ANTHROPIC_CACHE_BREAKPOINTS.saturating_sub(count_cache_breakpoints(request_body));
 
-    // 1. Prefer placing on the top-level system block if available
-    if let Some(system) = request_body.get_mut("system") {
-        match system {
-            Value::String(s) => {
-                let text = s.clone();
-                *system = serde_json::json!([
-                    {
-                        "type": "text",
-                        "text": text,
-                        "cache_control": ephemeral_marker
-                    }
-                ]);
-                return;
+    if budget > 0 {
+        let last_content = request_body
+            .get_mut("messages")
+            .and_then(|m| m.as_array_mut())
+            .and_then(|msgs| msgs.last_mut())
+            .and_then(|msg| msg.get_mut("content"));
+        if let Some(content) = last_content {
+            if mark_last_block(content) {
+                budget -= 1;
             }
-            Value::Array(blocks) => {
-                if let Some(last_block) = blocks.last_mut().and_then(|b| b.as_object_mut()) {
-                    if !last_block.contains_key("cache_control") {
-                        last_block.insert("cache_control".to_string(), ephemeral_marker);
-                    }
-                    return;
-                }
-            }
-            _ => {}
         }
     }
 
-    // 2. Otherwise place on the last eligible content block in messages
-    if let Some(messages) = request_body
-        .get_mut("messages")
-        .and_then(|m| m.as_array_mut())
-    {
-        if let Some(last_msg) = messages.last_mut() {
-            if let Some(content) = last_msg.get_mut("content") {
-                match content {
-                    Value::String(text) => {
-                        let text_val = text.clone();
-                        *content = serde_json::json!([
-                            {
-                                "type": "text",
-                                "text": text_val,
-                                "cache_control": ephemeral_marker
-                            }
-                        ]);
-                    }
-                    Value::Array(blocks) => {
-                        if let Some(last_block) = blocks.last_mut().and_then(|b| b.as_object_mut())
-                        {
-                            if !last_block.contains_key("cache_control") {
-                                last_block.insert("cache_control".to_string(), ephemeral_marker);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+    if budget > 0 {
+        if let Some(system) = request_body.get_mut("system") {
+            mark_last_block(system);
         }
     }
+}
+
+/// Puts a breakpoint on the last cacheable block of `content` (a string is converted to a text
+/// block). Returns true if a breakpoint was added. Content that already has one is left alone.
+fn mark_last_block(content: &mut Value) -> bool {
+    let marker = serde_json::json!({"type": "ephemeral"});
+    match content {
+        Value::String(text) if !text.is_empty() => {
+            *content = serde_json::json!([
+                {"type": "text", "text": std::mem::take(text), "cache_control": marker}
+            ]);
+            true
+        }
+        Value::Array(blocks) => {
+            if blocks.iter().any(|b| b.get("cache_control").is_some()) {
+                return false;
+            }
+            // Thinking blocks and empty text blocks cannot carry cache_control.
+            let target = blocks.iter_mut().rev().find(|b| {
+                let kind = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let empty_text = kind == "text"
+                    && b.get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .is_empty();
+                !matches!(kind, "thinking" | "redacted_thinking") && !empty_text
+            });
+            match target.and_then(|b| b.as_object_mut()) {
+                Some(block) => {
+                    block.insert("cache_control".to_string(), marker);
+                    true
+                }
+                None => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Maximum number of `cache_control` breakpoints Anthropic accepts per request.
+const MAX_ANTHROPIC_CACHE_BREAKPOINTS: usize = 4;
+
+/// Counts `cache_control` markers already present on tools, system blocks, and message content blocks.
+fn count_cache_breakpoints(request_body: &Value) -> usize {
+    let blocks = |v: Option<&Value>| -> usize {
+        v.and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|b| b.get("cache_control").is_some())
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let messages = request_body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .map(|msgs| msgs.iter().map(|m| blocks(m.get("content"))).sum())
+        .unwrap_or(0);
+    blocks(request_body.get("tools")) + blocks(request_body.get("system")) + messages
 }
 
 /// Injects a terse mode instruction if no terse instruction is already present.
@@ -283,6 +313,70 @@ mod tests {
         // Messages should NOT have cache_control on the message object
         let msgs = body["messages"].as_array().unwrap();
         assert!(msgs[0].get("cache_control").is_none());
+        // ...but the rolling breakpoint sits on the last message's content block
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(msgs[0]["content"][0]["text"], "hello");
+    }
+
+    #[test]
+    fn test_rolling_breakpoint_caches_history_and_skips_thinking() {
+        let mut body = json!({
+            "system": [{"type": "text", "text": "sys"}],
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "..."},
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "out"},
+                    {"type": "text", "text": ""}
+                ]}
+            ]
+        });
+        inject_cache_breakpoint(&mut body);
+        let last = &body["messages"][2]["content"];
+        assert_eq!(
+            last[0]["cache_control"]["type"], "ephemeral",
+            "skips empty text"
+        );
+        assert!(last[1].get("cache_control").is_none());
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(
+            body["messages"][0].get("content").unwrap().is_string(),
+            "older turns untouched"
+        );
+    }
+
+    #[test]
+    fn test_client_breakpoints_are_respected() {
+        // Client (e.g. Claude Code) already caches the tail; only the system slot is added.
+        let mut body = json!({
+            "system": "sys",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "q", "cache_control": {"type": "ephemeral"}}
+            ]}]
+        });
+        inject_cache_breakpoint(&mut body);
+        assert_eq!(count_cache_breakpoints(&body), 2);
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_inject_cache_breakpoint_respects_anthropic_limit() {
+        let marked = json!({"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}});
+        let mut body = json!({
+            "tools": [{"name": "a", "input_schema": {}, "cache_control": {"type": "ephemeral"}}],
+            "system": [{"type": "text", "text": "sys"}],
+            "messages": [
+                {"role": "user", "content": [marked.clone(), marked.clone(), marked]}
+            ]
+        });
+        inject_cache_breakpoint(&mut body);
+        assert!(
+            body["system"][0].get("cache_control").is_none(),
+            "a 5th breakpoint must not be injected"
+        );
     }
 
     #[test]

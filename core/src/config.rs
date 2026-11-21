@@ -15,11 +15,14 @@ pub struct AppConfig {
     pub max_cache_bytes: usize,
     /// Whether terse mode persona injection is enabled (default: false to preserve model output quality).
     pub terse_mode: bool,
-    /// Whether lossy request compression (log elision, array collapsing) is enabled (default: false).
+    /// Whether tool-output compression is enabled (default: true). Lossless (exact-duplicate
+    /// removal) unless the client exposes a `*retoken_retrieve` tool, which also enables elision
+    /// of large command/JSON output.
     pub compression_enabled: bool,
     /// Whether Contextual Compression and Retrieval (CCR) handle elision is enabled (default: false).
     pub ccr_enabled: bool,
-    /// Whether Anthropic prompt caching breakpoints and message reordering are injected (default: false for literal pass-through).
+    /// Whether Anthropic prompt caching breakpoints and message reordering are injected (default: true).
+    /// Breakpoints do not change what the model sees; they make repeated history billable at the cached rate.
     pub prompt_caching_enabled: bool,
     pub port: u16,
 
@@ -77,10 +80,10 @@ impl Default for AppConfig {
             max_cache_bytes: parse_env_var("RETOKEN_MAX_CACHE_BYTES")
                 .unwrap_or(256 * 1024 * 1024),
             terse_mode: parse_env_var("RETOKEN_TERSE_MODE").unwrap_or(false),
-            compression_enabled: parse_env_var("RETOKEN_COMPRESSION_ENABLED").unwrap_or(false),
+            compression_enabled: parse_env_var("RETOKEN_COMPRESSION_ENABLED").unwrap_or(true),
             ccr_enabled: parse_env_var("RETOKEN_CCR_ENABLED").unwrap_or(false),
             prompt_caching_enabled: parse_env_var("RETOKEN_PROMPT_CACHING_ENABLED")
-                .unwrap_or(false),
+                .unwrap_or(true),
             port: parse_env_var("RETOKEN_PORT").unwrap_or(8888),
             max_request_body_bytes: parse_env_var("RETOKEN_MAX_REQUEST_BODY_BYTES")
                 .unwrap_or(10 * 1024 * 1024),
@@ -99,7 +102,7 @@ impl Default for AppConfig {
                 .unwrap_or_default(),
             upstream_timeout_secs: parse_env_var("RETOKEN_UPSTREAM_TIMEOUT_SECS")
                 .unwrap_or(60),
-            persona_prompt: std::env::var("RETOKEN_PERSONA_PROMPT").unwrap_or_else(|_| "[ReToken Terse Mode Active (Inspired by Caveman). Extreme brevity. Zero pleasantries. Provide only raw technical data, code, or direct answers. Omit explanations. If data is elided with <<handle>>, use retoken_retrieve to fetch it instead of guessing.]".to_string()),
+            persona_prompt: std::env::var("RETOKEN_PERSONA_PROMPT").unwrap_or_else(|_| "[ReToken terse mode] Write prose replies tersely: answer first, then only the reasoning that matters. No greetings, filler, hedging, or recaps. Keep every fact, number, negation, warning, and caveat. Write code, commands, file contents, commit messages, and tool inputs normally, not tersely. If tool output was elided by ReToken, call the retrieval tool named in the marker instead of guessing.".to_string()),
             elision_note: std::env::var("RETOKEN_ELISION_NOTE").unwrap_or_else(|_| "Elements elided by ReToken. Original recoverable via retoken_retrieve tool.".to_string()),
             anthropic_base_url: std::env::var("RETOKEN_ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
             openai_base_url: std::env::var("RETOKEN_OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string()),
@@ -215,16 +218,16 @@ mod tests {
             "terse_mode must be false by default to preserve quality"
         );
         assert!(
-            !config.compression_enabled,
-            "compression_enabled must be false by default for lossless pass-through"
+            config.compression_enabled,
+            "compression_enabled is on by default (lossless without a retrieval tool)"
         );
         assert!(
             !config.ccr_enabled,
             "ccr_enabled must be false by default to avoid broken retrieval loops"
         );
         assert!(
-            !config.prompt_caching_enabled,
-            "prompt_caching_enabled must be false by default for literal pass-through"
+            config.prompt_caching_enabled,
+            "prompt_caching_enabled is on by default"
         );
         assert_eq!(config.max_cache_bytes, 256 * 1024 * 1024);
         assert!(
@@ -232,16 +235,16 @@ mod tests {
             "terse_mode must be false by default to preserve quality"
         );
         assert!(
-            !config.compression_enabled,
-            "compression_enabled must be false by default for lossless pass-through"
+            config.compression_enabled,
+            "compression_enabled is on by default (lossless without a retrieval tool)"
         );
         assert!(
             !config.ccr_enabled,
             "ccr_enabled must be false by default to avoid broken retrieval loops"
         );
         assert!(
-            !config.prompt_caching_enabled,
-            "prompt_caching_enabled must be false by default for literal pass-through"
+            config.prompt_caching_enabled,
+            "prompt_caching_enabled is on by default"
         );
         assert_eq!(config.upstream_timeout_secs, 60);
         assert!(config.allowed_upstream_hosts.is_empty());

@@ -1,0 +1,203 @@
+//! Decides what happens to one tool output: kept verbatim, replaced by a duplicate marker
+//! (lossless), or elided with a recovery marker (lossy, needs a retrieval tool).
+
+use serde_json::Value;
+use std::collections::HashMap;
+use tracing::{debug, warn};
+
+use super::calls::ToolCall;
+use super::classify::{is_command, is_file_content_read, is_file_read};
+use super::CompressOptions;
+use crate::ccr::{ccr_marker, CcrStore};
+use crate::code_outline;
+use crate::json::compress_json_heuristic_tracked;
+use crate::logs::compress_logs;
+use crate::pipeline::CompressionStats;
+
+/// Tool output smaller than this is never deduplicated (the marker would not pay off).
+const DEDUP_MIN_BYTES: usize = 512;
+
+/// Lossy elision must remove at least this fraction of the original to be worth the
+/// information loss and a possible retrieval round trip.
+const MIN_ELISION_SAVINGS: f64 = 0.25;
+
+/// True if `compressed` removes at least [`MIN_ELISION_SAVINGS`] of `original`.
+fn saves_enough(compressed: &str, original: &str) -> bool {
+    (compressed.len() as f64) <= (original.len() as f64) * (1.0 - MIN_ELISION_SAVINGS)
+}
+
+/// Threshold in bytes for content to be eligible for lossy elision.
+pub fn ccr_size_threshold() -> usize {
+    std::env::var("RETOKEN_CCR_SIZE_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2048)
+}
+
+/// Minimum line count for command output to be treated as a log.
+pub fn log_line_threshold() -> usize {
+    std::env::var("RETOKEN_LOG_LINE_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15)
+}
+
+/// The first occurrence of a tool output in the conversation.
+struct FirstCopy {
+    /// Description of the call that produced it, e.g. `Read(src/lib.rs)`.
+    call: Option<String>,
+    /// False if that copy was elided or outlined, so it no longer shows the full content.
+    verbatim: bool,
+}
+
+/// Per-conversation policy state: tool outputs already seen earlier in the request.
+pub struct OutputPolicy<'a> {
+    store: &'a CcrStore,
+    opts: &'a CompressOptions<'a>,
+    seen: HashMap<String, FirstCopy>,
+}
+
+impl<'a> OutputPolicy<'a> {
+    pub fn new(store: &'a CcrStore, opts: &'a CompressOptions<'a>) -> Self {
+        Self {
+            store,
+            opts,
+            seen: HashMap::new(),
+        }
+    }
+
+    /// Returns the replacement for one tool output text, or `None` to keep it verbatim.
+    /// `fresh` is true while the model has not yet had a turn with this output.
+    pub fn apply(
+        &mut self,
+        text: &str,
+        call: Option<&ToolCall>,
+        fresh: bool,
+        stats: &mut CompressionStats,
+    ) -> Option<String> {
+        if text.len() < DEDUP_MIN_BYTES {
+            return None;
+        }
+        let handle = CcrStore::handle(text.as_bytes());
+        if let Some(first) = self.seen.get(&handle) {
+            // A fresh re-read of a file whose earlier copy was outlined must show the content.
+            if fresh && !first.verbatim && call.is_some_and(is_file_content_read) {
+                return None;
+            }
+            let first_call = first.call.clone();
+            return Some(self.duplicate_marker(text, &handle, first_call.as_deref(), stats));
+        }
+        let replacement = self.elide(text, call, fresh, stats);
+        self.seen.insert(
+            handle,
+            FirstCopy {
+                call: call.map(ToolCall::describe),
+                verbatim: replacement.is_none(),
+            },
+        );
+        replacement
+    }
+
+    /// Lossless: the first copy is still in the conversation. The marker names the call that
+    /// produced it, so the model can find it in a long history.
+    fn duplicate_marker(
+        &self,
+        text: &str,
+        handle: &str,
+        first_call: Option<&str>,
+        stats: &mut CompressionStats,
+    ) -> String {
+        stats.duplicates_removed += 1;
+        let note = match first_call {
+            Some(call) => format!(
+                "[ReToken: identical to the earlier `{call}` result in this conversation; not repeated."
+            ),
+            None => "[ReToken: identical to an earlier tool result in this conversation; not repeated."
+                .to_string(),
+        };
+        let recoverable = self
+            .opts
+            .retrieve_tool
+            .filter(|_| self.store_original(text, "duplicate", stats).is_some());
+        match recoverable {
+            Some(tool) => format!("{} {}]", note, ccr_marker(handle, tool)),
+            None => format!("{}]", note),
+        }
+    }
+
+    /// Lossy, only with a retrieval route: large JSON or command output at first sight; large
+    /// file reads once stale (outlined). Searches and git output are never elided.
+    fn elide(
+        &self,
+        text: &str,
+        call: Option<&ToolCall>,
+        fresh: bool,
+        stats: &mut CompressionStats,
+    ) -> Option<String> {
+        let tool = self.opts.retrieve_tool?;
+        if text.len() < ccr_size_threshold() {
+            return None;
+        }
+        if call.is_some_and(is_file_read) {
+            if fresh || !call.is_some_and(is_file_content_read) {
+                return None;
+            }
+            let outline = code_outline::outline(text)?;
+            if !saves_enough(&outline, text) {
+                return None;
+            }
+            stats.code_outlines += 1;
+            let handle = self.store_original(text, "file", stats)?;
+            return Some(format!(
+                "{}\n{} Or re-read the file; line numbers above are exact.",
+                outline,
+                ccr_marker(&handle, tool)
+            ));
+        }
+
+        let compressed = if let Ok(json) = serde_json::from_str::<Value>(text) {
+            if !(json.is_array() || json.is_object()) {
+                return None;
+            }
+            let (collapsed, did_compress) =
+                compress_json_heuristic_tracked(&json, self.opts.elision_note);
+            if !did_compress {
+                return None;
+            }
+            stats.json_arrays_collapsed += 1;
+            serde_json::to_string(&collapsed).ok()?
+        } else if call.is_some_and(is_command) && text.lines().count() >= log_line_threshold() {
+            stats.log_blocks_compressed += 1;
+            compress_logs(text)
+        } else {
+            return None;
+        };
+
+        if !saves_enough(&compressed, text) {
+            return None;
+        }
+        let handle = self.store_original(text, "tool_output", stats)?;
+        Some(format!("{}\n{}", compressed, ccr_marker(&handle, tool)))
+    }
+
+    /// Stores the original before anything referencing it is forwarded. On failure the
+    /// caller keeps the content verbatim.
+    fn store_original(
+        &self,
+        text: &str,
+        content_type: &str,
+        stats: &mut CompressionStats,
+    ) -> Option<String> {
+        match self.store.store(text.as_bytes(), content_type) {
+            Ok(handle) => {
+                stats.ccr_entries_stored += 1;
+                debug!("CCR stored original: {}", handle);
+                Some(handle)
+            }
+            Err(e) => {
+                warn!("CCR store failed, keeping content verbatim: {}", e);
+                None
+            }
+        }
+    }
+}

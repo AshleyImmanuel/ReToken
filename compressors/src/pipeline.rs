@@ -3,12 +3,15 @@ use tracing::info;
 
 use crate::ccr::CcrStore;
 use crate::inject::{inject_ccr_tool_for_provider, inject_output_persona_for_provider};
-use crate::process::compress_messages;
+use crate::tool_output::{compress_messages, CompressOptions};
 
-/// The full heuristic compression pipeline applied to an LLM API request body.
+/// Statistics for one run of the compression pipeline.
+#[derive(Debug, Default, Clone)]
 pub struct CompressionStats {
     pub log_blocks_compressed: usize,
     pub json_arrays_collapsed: usize,
+    pub duplicates_removed: usize,
+    pub code_outlines: usize,
     pub ccr_entries_stored: usize,
     pub bytes_saved: usize,
     pub original_size: usize,
@@ -20,80 +23,81 @@ impl CompressionStats {
         if self.original_size == 0 {
             return 0.0;
         }
-        1.0 - (self.compressed_size as f64 / self.original_size as f64)
+        self.bytes_saved as f64 / self.original_size as f64
     }
 }
 
-/// Runs the full compression pipeline on an API request body for a specific provider.
+/// Name of the retrieval tool the proxy injects when it resolves retrievals itself.
+pub const PROXY_RETRIEVE_TOOL: &str = "retoken_retrieve";
+
+/// How the model can recover content that ReToken elides. Lossy elision is only performed
+/// when a route exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recovery {
+    /// No route: only lossless transforms are applied.
+    None,
+    /// The proxy injects `retoken_retrieve` and resolves calls itself (non-streaming only).
+    Proxy,
+    /// The client exposes a retrieval tool (the `retoken mcp` server) under this name.
+    /// Works for streaming requests because the agent executes the tool itself.
+    ClientTool(String),
+}
+
+impl Recovery {
+    fn tool_name(&self) -> Option<&str> {
+        match self {
+            Recovery::None => None,
+            Recovery::Proxy => Some(PROXY_RETRIEVE_TOOL),
+            Recovery::ClientTool(name) => Some(name),
+        }
+    }
+}
+
+/// Runs the compression pipeline on a request body.
 pub fn run_pipeline_for_provider(
     body: &mut Value,
     ccr_store: &CcrStore,
-    is_stream: bool,
     persona_prompt: &str,
     elision_note: &str,
     is_anthropic: bool,
-    recovery_supported: bool,
+    recovery: &Recovery,
 ) -> CompressionStats {
-    let original_bytes = serde_json::to_vec(body).unwrap_or_default();
-    let original_size = original_bytes.len();
-
+    let original_size = serde_json::to_vec(body).map(|b| b.len()).unwrap_or(0);
     let mut stats = CompressionStats {
-        log_blocks_compressed: 0,
-        json_arrays_collapsed: 0,
-        ccr_entries_stored: 0,
-        bytes_saved: 0,
         original_size,
-        compressed_size: 0,
+        ..Default::default()
     };
 
-    // If the request is streaming, or if transparent recovery is not supported for this provider,
-    // we MUST NOT perform lossy CCR elisions or inject fictitious retrieval tools.
-    if !is_stream && recovery_supported {
-        compress_messages(body, ccr_store, &mut stats, elision_note);
+    let opts = CompressOptions {
+        retrieve_tool: recovery.tool_name(),
+        elision_note,
+    };
+    compress_messages(body, ccr_store, &mut stats, &opts);
 
-        if stats.ccr_entries_stored > 0 {
-            inject_ccr_tool_for_provider(body, is_anthropic);
-        }
+    if *recovery == Recovery::Proxy && stats.ccr_entries_stored > 0 {
+        inject_ccr_tool_for_provider(body, is_anthropic);
     }
 
     inject_output_persona_for_provider(body, persona_prompt, is_anthropic);
 
-    let compressed_bytes = serde_json::to_vec(body).unwrap_or_default();
-    stats.compressed_size = compressed_bytes.len();
+    stats.compressed_size = serde_json::to_vec(body).map(|b| b.len()).unwrap_or(0);
     stats.bytes_saved = original_size.saturating_sub(stats.compressed_size);
 
     if stats.bytes_saved > 0 {
         info!(
-            "Pipeline: {} -> {} bytes ({:.1}% reduction) | logs={} json={} ccr={}",
+            "Pipeline: {} -> {} bytes ({:.1}% reduction) | logs={} json={} dups={} outlines={} ccr={}",
             stats.original_size,
             stats.compressed_size,
             stats.ratio() * 100.0,
             stats.log_blocks_compressed,
             stats.json_arrays_collapsed,
+            stats.duplicates_removed,
+            stats.code_outlines,
             stats.ccr_entries_stored
         );
     }
 
     stats
-}
-
-/// Runs the default compression pipeline (assuming Anthropic format and recovery supported).
-pub fn run_pipeline(
-    body: &mut Value,
-    ccr_store: &CcrStore,
-    is_stream: bool,
-    persona_prompt: &str,
-    elision_note: &str,
-) -> CompressionStats {
-    run_pipeline_for_provider(
-        body,
-        ccr_store,
-        is_stream,
-        persona_prompt,
-        elision_note,
-        true,
-        true,
-    )
 }
 
 #[cfg(test)]
@@ -120,7 +124,14 @@ mod tests {
             ]
         });
 
-        let stats = run_pipeline(&mut body, &store, false, "test persona", "test elision");
+        let stats = run_pipeline_for_provider(
+            &mut body,
+            &store,
+            "test persona",
+            "test elision",
+            true,
+            &Recovery::Proxy,
+        );
         assert!(stats.json_arrays_collapsed > 0 || stats.log_blocks_compressed > 0);
         assert!(stats.compressed_size <= stats.original_size);
     }
@@ -143,11 +154,20 @@ mod tests {
             "model": "gpt-4o",
             "messages": [
                 {"role": "user", "content": "run build"},
-                {"role": "tool", "content": log_text}
+                {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "shell", "arguments": "{\"command\":\"make\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": log_text}
             ]
         });
 
-        let stats = run_pipeline(&mut body, &store, false, "test persona", "test elision");
+        let stats = run_pipeline_for_provider(
+            &mut body,
+            &store,
+            "test persona",
+            "test elision",
+            true,
+            &Recovery::Proxy,
+        );
         assert!(stats.log_blocks_compressed > 0);
     }
 
@@ -171,11 +191,10 @@ mod tests {
         let stats = run_pipeline_for_provider(
             &mut body,
             &store,
-            false,
             "test persona",
             "test elision",
             false,
-            false,
+            &Recovery::None,
         );
 
         assert_eq!(stats.ccr_entries_stored, 0);
@@ -202,7 +221,14 @@ mod tests {
             ]
         });
 
-        let stats = run_pipeline(&mut body, &store, false, "test persona", "test elision");
+        let stats = run_pipeline_for_provider(
+            &mut body,
+            &store,
+            "test persona",
+            "test elision",
+            true,
+            &Recovery::Proxy,
+        );
 
         if stats.ccr_entries_stored > 0 {
             let tools = body.get("tools").and_then(|t| t.as_array());
@@ -228,11 +254,10 @@ mod tests {
         run_pipeline_for_provider(
             &mut body,
             &store,
-            false,
             "test persona",
             "test elision",
             false,
-            false,
+            &Recovery::None,
         );
 
         let messages = body.get("messages").unwrap().as_array().unwrap();

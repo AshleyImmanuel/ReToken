@@ -5,13 +5,13 @@ const CLAUDE_CODE_CONTENT: &str = r#"# ReToken Terse Optimization Configuration 
 # This configures Claude Code to automatically be aware of ReToken.
 
 # ReToken is an intercepting proxy. It will automatically elide large logs and JSON.
-# It injects a tool called `retoken_retrieve` into your schema.
-# DO NOT hallucinate elided data. If you see <<ccr:...>>, call `retoken_retrieve`.
+# Elided tool output is marked `[ReToken: ... handle "ccr:..." ...]` and names the retrieval tool to call.
+# DO NOT hallucinate elided data. If you see a [ReToken: ...] marker, call the retrieval tool it names.
 
 # Keep your outputs extremely terse. No conversational filler. Provide only raw code or data.
 
 ## Available Tool Commands
-- **`retoken_retrieve(handle)`**: When you see data replaced with `<<ccr:...>>`, invoke the `retoken_retrieve` tool with the handle as the argument to fetch the original, uncompressed bytes.
+- **`retoken_retrieve(handle)`**: When you see data replaced with a `[ReToken: ... handle "ccr:..." ...]` marker, invoke the `retoken_retrieve` tool with the handle as the argument to fetch the original, uncompressed bytes.
 - **CLI Wrap**: If you need to spawn a sub-agent or script that uses an LLM, prefix it with `retoken wrap -- ` (e.g. `retoken wrap -- aider` or `retoken wrap -- python script.py`). This forces all sub-agent LLM traffic through ReToken.
 - **CLI Analyze**: Run `retoken analyze .` to gather intelligence about a codebase.
 "#;
@@ -28,12 +28,12 @@ You are currently running behind the ReToken proxy.
 ReToken is a local-first Agent Runtime Optimizer designed for AI coding agents. It saves tokens by intercepting your requests and eliding large logs, JSON arrays, and file contents with `<<ccr:...>>` handles.
 
 ## Available Tool Commands
-- **`retoken_retrieve(handle)`**: When you see data replaced with `<<ccr:...>>`, invoke the injected `retoken_retrieve` tool with the handle as the argument to fetch the original bytes.
+- **`retoken_retrieve(handle)`**: When you see data replaced with a `[ReToken: ... handle "ccr:..." ...]` marker, invoke the injected `retoken_retrieve` tool with the handle as the argument to fetch the original bytes.
 - **CLI Wrap**: If you need to spawn a sub-agent or run an LLM script, prefix the command with `retoken wrap -- ` (e.g. `retoken wrap -- python main.py`). This transparently routes its traffic through ReToken.
 - **CLI Analyze**: Run `retoken analyze <path>` to gather structural intelligence about a directory.
 
 ## Rules
-1. **Never guess elided data**: If you see a handle like `<<ccr:...>>` and need the original contents, you MUST use the `retoken_retrieve` tool to fetch it.
+1. **Never guess elided data**: If you see a handle like `ccr:...` in a ReToken marker and need the original contents, you MUST use the `retoken_retrieve` tool to fetch it.
 2. **Terse Mode (Caveman Inspired)**: ReToken enforces extreme brevity, drawing inspiration from the mature Caveman ecosystem. You must output only raw technical data, code, or direct answers. Omit all pleasantries and explanations.
 "#;
 

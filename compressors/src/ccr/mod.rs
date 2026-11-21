@@ -1,9 +1,7 @@
-pub mod entry;
 pub mod paths;
 pub mod schema;
 pub mod store;
 
-pub use entry::CcrEntry;
 pub use schema::{ccr_marker, ccr_tool_schema};
 pub use store::CcrStore;
 

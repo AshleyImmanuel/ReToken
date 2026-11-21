@@ -4,7 +4,8 @@ use retoken_core::config::AppConfig;
 use tracing::warn;
 
 use crate::provider::{
-    build_target_url, detect_provider, is_hop_by_hop_header, is_internal_header,
+    build_target_url, check_destination_host, detect_provider, forwardable_request_headers,
+    is_hop_by_hop_header, is_ssrf_block,
 };
 
 /// Raw passthrough for bypass mode, streaming request and response preserving upstream headers.
@@ -33,18 +34,9 @@ pub async fn forward_raw(
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
     let (parts, body) = req.into_parts();
-    let mut req_builder = client.request(method, &target_url);
-
-    for (header_name, header_value) in parts.headers.iter() {
-        let name_str = header_name.as_str();
-        if header_name != axum::http::header::HOST
-            && header_name != axum::http::header::CONTENT_LENGTH
-            && !is_hop_by_hop_header(name_str)
-            && !is_internal_header(name_str)
-        {
-            req_builder = req_builder.header(header_name, header_value);
-        }
-    }
+    let req_builder = client
+        .request(method, &target_url)
+        .headers(forwardable_request_headers(&parts.headers));
 
     // Stream request body
     let reqwest_req = req_builder
@@ -52,9 +44,26 @@ pub async fn forward_raw(
         .build()
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
+    // SSRF policy: IP-literal hosts are checked here; hostnames by the client's SsrfResolver.
+    if !config.allow_private_upstreams {
+        let host = reqwest_req
+            .url()
+            .host_str()
+            .ok_or(axum::http::StatusCode::BAD_REQUEST)?;
+        if let Err(e) = check_destination_host(host) {
+            warn!("Bypass destination blocked by SSRF policy: {}", e);
+            return Err(axum::http::StatusCode::FORBIDDEN);
+        }
+    }
+
     let resp = client.execute(reqwest_req).await.map_err(|e| {
-        warn!("Bypass proxy failed: {}", e);
-        axum::http::StatusCode::BAD_GATEWAY
+        if is_ssrf_block(&e) {
+            warn!("Bypass destination blocked by SSRF policy: {}", e);
+            axum::http::StatusCode::FORBIDDEN
+        } else {
+            warn!("Bypass proxy failed: {}", e);
+            axum::http::StatusCode::BAD_GATEWAY
+        }
     })?;
 
     let status = resp.status();

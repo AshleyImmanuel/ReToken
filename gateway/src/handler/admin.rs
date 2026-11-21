@@ -106,6 +106,7 @@ pub async fn admin_stats(
             "total_requests": tel.total_requests,
             "total_errors": tel.total_errors,
             "total_bytes_transferred": tel.total_bytes_transferred,
+            "total_bytes_saved": tel.total_bytes_saved,
             "total_input_tokens": tel.total_input_tokens,
             "total_output_tokens": tel.total_output_tokens,
             "total_cached_tokens": tel.total_cached_tokens,

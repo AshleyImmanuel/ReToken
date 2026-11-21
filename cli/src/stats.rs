@@ -64,6 +64,10 @@ pub async fn run_stats() -> anyhow::Result<()> {
                     .get("total_bytes_transferred")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
+                let bytes_saved = json
+                    .get("total_bytes_saved")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let in_tokens = json
                     .get("total_input_tokens")
                     .and_then(|v| v.as_u64())
@@ -117,6 +121,16 @@ pub async fn run_stats() -> anyhow::Result<()> {
                     "  Data Transferred: {:.2} KB ({} bytes)",
                     bytes as f64 / 1024.0,
                     bytes
+                );
+                let saved_pct = if bytes > 0 {
+                    bytes_saved as f64 / bytes as f64 * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "  Request Bytes Saved: {:.2} KB ({:.1}% of original payloads)",
+                    bytes_saved as f64 / 1024.0,
+                    saved_pct
                 );
                 println!("  Token Accounting:");
                 println!("    Input Tokens Processed: {}", in_tokens);

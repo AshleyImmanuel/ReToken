@@ -54,6 +54,20 @@ pub fn inject_ccr_tool_for_provider(body: &mut Value, is_anthropic: bool) {
     }
 }
 
+/// Returns the name of a client-provided retrieval tool (e.g. the `retoken mcp` server, exposed
+/// as `mcp__retoken__retoken_retrieve` by Claude Code or `retoken_retoken_retrieve` by
+/// opencode), if the request's tool list contains one.
+pub fn find_client_retrieve_tool(body: &Value) -> Option<String> {
+    body.get("tools")?.as_array()?.iter().find_map(|t| {
+        let name = t
+            .get("name")
+            .or_else(|| t.get("function").and_then(|f| f.get("name")))
+            .and_then(|n| n.as_str())?;
+        name.ends_with(crate::pipeline::PROXY_RETRIEVE_TOOL)
+            .then(|| name.to_string())
+    })
+}
+
 /// Backwards-compatible CCR tool injection (defaults to Anthropic schema).
 pub fn inject_ccr_tool(body: &mut Value) {
     inject_ccr_tool_for_provider(body, true);
@@ -106,12 +120,25 @@ pub fn inject_output_persona_for_provider(body: &mut Value, persona: &str, is_an
             for msg in messages.iter_mut() {
                 if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
                     found_system = true;
-                    if let Some(content) = msg.get_mut("content") {
-                        if let Some(s) = content.as_str() {
+                    match msg.get_mut("content") {
+                        Some(Value::String(s)) => {
                             if !s.contains(persona) {
-                                *content = Value::String(format!("{}\n\n{}", s, persona));
+                                s.push_str("\n\n");
+                                s.push_str(persona);
                             }
                         }
+                        // Content-part arrays: append a text part unless already present.
+                        Some(Value::Array(parts)) => {
+                            let already = parts.iter().any(|p| {
+                                p.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .is_some_and(|t| t.contains(persona))
+                            });
+                            if !already {
+                                parts.push(serde_json::json!({"type": "text", "text": persona}));
+                            }
+                        }
+                        _ => {}
                     }
                     break;
                 }
@@ -186,6 +213,30 @@ mod tests {
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "Be terse");
         assert_eq!(msgs[1]["role"], "user");
+    }
+
+    #[test]
+    fn test_find_client_retrieve_tool() {
+        let claude = json!({"tools": [
+            {"name": "Read", "input_schema": {}},
+            {"name": "mcp__retoken__retoken_retrieve", "input_schema": {}}
+        ]});
+        assert_eq!(
+            find_client_retrieve_tool(&claude).as_deref(),
+            Some("mcp__retoken__retoken_retrieve")
+        );
+        let openai = json!({"tools": [
+            {"type": "function", "function": {"name": "retoken_retoken_retrieve"}}
+        ]});
+        assert_eq!(
+            find_client_retrieve_tool(&openai).as_deref(),
+            Some("retoken_retoken_retrieve")
+        );
+        assert_eq!(
+            find_client_retrieve_tool(&json!({"tools": [{"name": "Bash"}]})),
+            None
+        );
+        assert_eq!(find_client_retrieve_tool(&json!({})), None);
     }
 
     #[test]

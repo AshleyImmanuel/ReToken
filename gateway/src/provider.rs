@@ -1,6 +1,7 @@
+use reqwest::header::HeaderMap;
 use retoken_core::config::AppConfig;
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 /// Supported API providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +26,29 @@ impl Provider {
             Provider::Anthropic => "anthropic",
             Provider::OpenAI => "openai",
             Provider::Generic { name, .. } => name.as_str(),
+        }
+    }
+}
+
+/// The request/response schema a request uses. A generic upstream (e.g. an OpenAI-compatible
+/// gateway that also serves Claude) can speak either, so this is decided per request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireFormat {
+    /// Anthropic Messages API: top-level `system`, `tool_use`/`tool_result` content blocks.
+    Anthropic,
+    /// OpenAI Chat Completions and compatible APIs: `system` role messages, `tool_calls`.
+    OpenAI,
+}
+
+impl WireFormat {
+    /// Anthropic for the Anthropic provider and for any `/messages` endpoint; OpenAI otherwise.
+    pub fn detect(provider: &Provider, path: &str) -> Self {
+        let path = path.split('?').next().unwrap_or(path);
+        match provider {
+            Provider::Anthropic => WireFormat::Anthropic,
+            Provider::OpenAI => WireFormat::OpenAI,
+            Provider::Generic { .. } if path.contains("/messages") => WireFormat::Anthropic,
+            Provider::Generic { .. } => WireFormat::OpenAI,
         }
     }
 }
@@ -106,8 +130,9 @@ pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
     }
 }
 
-/// Returns true if the host is a loopback, link-local, or private network address,
-/// or resolves to one via DNS.
+/// Returns true if the host is a loopback, link-local, or private network address by name
+/// or IP literal. Performs no DNS lookup: hostnames are verified against their resolved
+/// addresses at connect time by [`SsrfResolver`].
 pub fn is_private_or_loopback_host(host: &str) -> bool {
     let clean = host.trim().trim_start_matches('[').trim_end_matches(']');
     let lower = clean.to_ascii_lowercase();
@@ -128,15 +153,6 @@ pub fn is_private_or_loopback_host(host: &str) -> bool {
 
     if let Ok(ip) = clean.parse::<IpAddr>() {
         return is_private_or_loopback_ip(ip);
-    }
-
-    // Attempt DNS lookup. If any resolved IP targets a private or loopback address, reject.
-    if let Ok(addrs) = (clean, 80).to_socket_addrs() {
-        for addr in addrs {
-            if is_private_or_loopback_ip(addr.ip()) {
-                return true;
-            }
-        }
     }
 
     false
@@ -215,79 +231,120 @@ pub fn validate_upstream_url(
     Ok(clean)
 }
 
-/// Resolves a host to its socket addresses, verifies that all resolved IP addresses are safe
-/// under the SSRF policy (non-loopback, non-private, non-metadata), and returns the first
-/// verified SocketAddr to allow connect-time IP pinning.
-pub fn resolve_and_verify_destination(
-    host: &str,
-    port: u16,
-    allow_private: bool,
-) -> Result<Option<std::net::SocketAddr>, String> {
-    if allow_private {
-        return Ok(None);
+/// A destination rejected by the SSRF policy. Kept as a distinct error type so it can be
+/// recognized (via [`is_ssrf_block`]) after reqwest wraps it in a connect error.
+#[derive(Debug)]
+pub struct SsrfBlocked(pub String);
+
+impl std::fmt::Display for SsrfBlocked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
+}
 
-    let clean = host.trim().trim_start_matches('[').trim_end_matches(']');
+impl std::error::Error for SsrfBlocked {}
 
-    // Check if host is an explicit IP literal
-    if let Ok(ip) = clean.parse::<IpAddr>() {
-        if is_private_or_loopback_ip(ip) {
-            return Err(format!(
-                "Destination IP '{}' targets a loopback, local, or private address (disallowed by SSRF policy)",
-                ip
-            ));
-        }
-        return Ok(Some(std::net::SocketAddr::new(ip, port)));
+/// Rejects a destination host that is private by name or IP literal. Performs no DNS lookup.
+///
+/// reqwest never calls the DNS resolver for IP-literal hosts, so callers must run this check
+/// before sending; hostnames are additionally verified by [`SsrfResolver`] at connect time.
+pub fn check_destination_host(host: &str) -> Result<(), SsrfBlocked> {
+    if is_private_or_loopback_host(host) {
+        return Err(SsrfBlocked(format!(
+            "Destination host '{}' targets a loopback, local, or private address (disallowed by SSRF policy)",
+            host
+        )));
     }
+    Ok(())
+}
 
-    // Static check for internal domain suffixes
-    if is_private_or_loopback_host(clean) {
-        return Err(format!(
-            "Destination host '{}' targets a loopback, local, or internal address (disallowed by SSRF policy)",
-            clean
-        ));
-    }
-
-    // Resolve DNS and verify ALL resolved addresses
-    let addrs = (clean, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("Failed to resolve destination host '{}': {}", clean, e))?;
-
-    let mut first_addr = None;
-    let mut resolved_any = false;
-    for addr in addrs {
-        resolved_any = true;
-        if is_private_or_loopback_ip(addr.ip()) {
-            return Err(format!(
-                "Destination host '{}' resolved to private/loopback IP '{}' (blocked by SSRF protection)",
-                clean,
-                addr.ip()
-            ));
-        }
-        if first_addr.is_none() {
-            first_addr = Some(addr);
-        }
-    }
-
-    if !resolved_any {
-        return Err(format!(
+/// Verifies that a hostname resolved to at least one address and that none of them are
+/// loopback, private, link-local, or metadata addresses.
+pub fn verify_resolved_addrs(host: &str, addrs: &[SocketAddr]) -> Result<(), SsrfBlocked> {
+    if addrs.is_empty() {
+        return Err(SsrfBlocked(format!(
             "Destination host '{}' did not resolve to any addresses",
-            clean
-        ));
+            host
+        )));
     }
+    if let Some(bad) = addrs.iter().find(|a| is_private_or_loopback_ip(a.ip())) {
+        return Err(SsrfBlocked(format!(
+            "Destination host '{}' resolved to private/loopback IP '{}' (blocked by SSRF protection)",
+            host,
+            bad.ip()
+        )));
+    }
+    Ok(())
+}
 
-    Ok(first_addr)
+/// DNS resolver for the shared upstream client that enforces the SSRF policy at connect time.
+///
+/// reqwest connects only to the addresses this resolver returns, so the addresses that were
+/// verified are exactly the ones dialed (no DNS-rebinding TOCTOU window). Resolution is async
+/// and the shared client keeps its connection pool across requests.
+pub struct SsrfResolver;
+
+impl reqwest::dns::Resolve for SsrfResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            check_destination_host(&host)?;
+            let addrs: Vec<SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            verify_resolved_addrs(&host, &addrs)?;
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Returns true if the error (or any error in its source chain) is an SSRF policy rejection.
+pub fn is_ssrf_block(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if e.is::<SsrfBlocked>() {
+            return true;
+        }
+        current = e.source();
+    }
+    false
+}
+
+/// Copies request headers that may be forwarded upstream, dropping `Host`, `Content-Length`,
+/// hop-by-hop headers, and internal `x-retoken-*` control headers. Values are copied as raw
+/// bytes, so non-UTF-8 header values survive unchanged.
+///
+/// `Accept-Encoding` is dropped too: the gateway reads response bodies (token usage, CCR
+/// recovery, caching) and does not decompress, so upstream must answer uncompressed. Only the
+/// loopback leg to the client is affected.
+pub fn forwardable_request_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut out = HeaderMap::with_capacity(headers.len());
+    for (name, value) in headers {
+        let name_str = name.as_str();
+        if name != reqwest::header::HOST
+            && name != reqwest::header::CONTENT_LENGTH
+            && name != reqwest::header::ACCEPT_ENCODING
+            && !is_hop_by_hop_header(name_str)
+            && !is_internal_header(name_str)
+        {
+            out.append(name.clone(), value.clone());
+        }
+    }
+    out
 }
 
 /// Detects the provider from the incoming request's path and headers.
 ///
 /// Detection strategy:
 ///   1. If `x-retoken-upstream-url` header is present -> Generic provider (validated)
-///   2. If path contains `/v1/messages` or starts with `/messages` -> Anthropic (Claude API)
-///   3. If path contains `/v1/chat/completions` or starts with `/chat/completions` -> OpenAI
-///   4. If `x-api-key` header present -> Anthropic
-///   5. If `Authorization: Bearer` header present -> OpenAI
-///   6. Fallback to Anthropic
+///   2. Credentials of a provider ReToken cannot route (Gemini `x-goog-api-key`, `?key=`)
+///      -> rejected, so they are never forwarded to another provider
+///   3. If path contains `/v1/messages` or starts with `/messages` -> Anthropic (Claude API)
+///   4. If path contains `/v1/chat/completions` or starts with `/chat/completions` -> OpenAI
+///   5. Anthropic headers (`x-api-key`, `anthropic-version`, `anthropic-beta`) -> Anthropic.
+///      Checked before `Bearer` because Anthropic OAuth clients (Claude Code subscriptions)
+///      also send `Authorization: Bearer`.
+///   6. If `Authorization: Bearer` header present -> OpenAI
+///   7. Fallback to Anthropic (no credentials present, so nothing can leak)
 pub fn detect_provider(
     path: &str,
     headers: &[(String, String)],
@@ -316,7 +373,20 @@ pub fn detect_provider(
         });
     }
 
-    // 2 & 3. Path-based detection
+    // 2. Never guess a destination for another provider's credentials.
+    let has_header = |wanted: &str| headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(wanted));
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    if has_header("x-goog-api-key")
+        || query.split('&').any(|kv| kv.starts_with("key="))
+        || path.starts_with("/v1beta/")
+    {
+        return Err(
+            "Gemini API requests are not supported; set x-retoken-upstream-url to route them explicitly"
+                .to_string(),
+        );
+    }
+
+    // 3 & 4. Path-based detection
     if path.contains("/v1/messages") || path.starts_with("/messages") {
         return Ok(Provider::Anthropic);
     }
@@ -328,11 +398,9 @@ pub fn detect_provider(
         return Ok(Provider::OpenAI);
     }
 
-    // 4 & 5. Header-based detection
-    for (name, _value) in headers {
-        if name.eq_ignore_ascii_case("x-api-key") {
-            return Ok(Provider::Anthropic);
-        }
+    // 5 & 6. Header-based detection
+    if has_header("x-api-key") || has_header("anthropic-version") || has_header("anthropic-beta") {
+        return Ok(Provider::Anthropic);
     }
     for (name, value) in headers {
         if name.eq_ignore_ascii_case("authorization") && value.starts_with("Bearer ") {
@@ -399,7 +467,8 @@ pub fn build_target_url(
     Ok(parsed.to_string())
 }
 
-/// Extracts token usage from a provider's response body.
+/// Token counts reported by a provider.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: Option<usize>,
     pub output_tokens: Option<usize>,
@@ -408,22 +477,18 @@ pub struct TokenUsage {
 }
 
 pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUsage {
-    let mut usage = TokenUsage {
-        input_tokens: None,
-        output_tokens: None,
-        cached_tokens: None,
-        reasoning_tokens: None,
-    };
+    match serde_json::from_slice::<serde_json::Value>(response_body) {
+        Ok(json) => json
+            .get("usage")
+            .map(|u| usage_from_object(provider, u))
+            .unwrap_or_default(),
+        Err(_) => TokenUsage::default(),
+    }
+}
 
-    let json: serde_json::Value = match serde_json::from_slice(response_body) {
-        Ok(v) => v,
-        Err(_) => return usage,
-    };
-
-    let usage_obj = match json.get("usage") {
-        Some(u) => u,
-        None => return usage,
-    };
+/// Parses a provider `usage` object into token counts.
+pub fn usage_from_object(provider: &Provider, usage_obj: &serde_json::Value) -> TokenUsage {
+    let mut usage = TokenUsage::default();
 
     match provider {
         Provider::Anthropic => {
@@ -625,6 +690,59 @@ mod tests {
                 name: "together".into(),
                 base_url: "https://api.together.xyz/v1".into(),
             }
+        );
+    }
+
+    #[test]
+    fn test_detect_provider_never_misroutes_credentials() {
+        let h = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        // Gemini credentials must never be forwarded to Anthropic or OpenAI.
+        assert!(detect_provider("/v1beta/models/g:generateContent", &h(&[]), false, &[]).is_err());
+        assert!(detect_provider("/v1/models", &h(&[("x-goog-api-key", "k")]), false, &[]).is_err());
+        assert!(detect_provider("/v1/models?key=abc", &h(&[]), false, &[]).is_err());
+        // Anthropic OAuth (Bearer + anthropic-version) on a non-messages path stays Anthropic.
+        let oauth = h(&[
+            ("authorization", "Bearer sk-ant-oat"),
+            ("anthropic-version", "2023-06-01"),
+        ]);
+        assert_eq!(
+            detect_provider("/v1/models", &oauth, false, &[]).unwrap(),
+            Provider::Anthropic
+        );
+        // Plain Bearer is still OpenAI.
+        let openai = h(&[("authorization", "Bearer sk-1")]);
+        assert_eq!(
+            detect_provider("/v1/responses", &openai, false, &[]).unwrap(),
+            Provider::OpenAI
+        );
+    }
+
+    #[test]
+    fn test_wire_format_follows_the_endpoint_for_generic_upstreams() {
+        let generic = Provider::Generic {
+            name: "zen".into(),
+            base_url: "https://opencode.ai/zen".into(),
+        };
+        assert_eq!(
+            WireFormat::detect(&generic, "/v1/messages"),
+            WireFormat::Anthropic
+        );
+        assert_eq!(
+            WireFormat::detect(&generic, "/v1/chat/completions"),
+            WireFormat::OpenAI
+        );
+        assert_eq!(
+            WireFormat::detect(&Provider::Anthropic, "/v1/models"),
+            WireFormat::Anthropic
+        );
+        assert_eq!(
+            WireFormat::detect(&Provider::OpenAI, "/v1/messages?x=1"),
+            WireFormat::OpenAI
         );
     }
 

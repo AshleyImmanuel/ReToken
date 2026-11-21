@@ -1,240 +1,259 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info, warn};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
+use tracing::{debug, info, warn};
 
-use crate::ccr::entry::CcrEntry;
 use crate::ccr::paths::dirs_or_default;
+
+/// Handle prefix for content-addressed CCR entries.
+const HANDLE_PREFIX: &str = "ccr:";
 
 /// The ReToken Cache & Recovery (CCR) store.
 ///
-/// A file-backed, content-addressed store that preserves original data before
-/// compression. When the proxy compresses/elides data from a payload, the
-/// original bytes are stored here under a SHA-256 handle.
+/// Content-addressed: every original is stored under `ccr:<sha256 hex>` before the elided
+/// payload is forwarded upstream. The persistent backend keeps one file per entry in a
+/// directory, so a separate process (the `retoken mcp` retrieval server) can read an entry
+/// the moment the proxy writes it, and identical content is only ever written once.
 pub struct CcrStore {
-    inner: Arc<Mutex<CcrInner>>,
+    backend: Backend,
 }
 
-struct CcrInner {
-    entries: HashMap<String, CcrEntry>,
-    file_states: HashMap<String, String>, // Track per-file state for Contextual Delta Encoding
-    db_path: Option<PathBuf>,
-    dirty: bool,
-}
-
-impl CcrInner {
-    fn flush(&mut self) {
-        if !self.dirty {
-            return;
-        }
-        if let Some(ref path) = self.db_path {
-            match serde_json::to_string(&self.entries) {
-                Ok(json) => {
-                    if let Err(e) = fs::write(path, json) {
-                        error!("CCR flush failed: {}", e);
-                    } else {
-                        self.dirty = false;
-                    }
-                }
-                Err(e) => error!("CCR serialize failed: {}", e),
-            }
-        }
-    }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+enum Backend {
+    Dir(PathBuf),
+    Memory(Mutex<HashMap<String, Vec<u8>>>),
 }
 
 impl CcrStore {
-    /// Opens or creates the CCR database at the given path.
-    pub fn open(db_path: Option<PathBuf>) -> Result<Self, String> {
-        let path = db_path.unwrap_or_else(|| {
-            let mut p = dirs_or_default();
-            p.push("retoken_ccr.json");
-            p
-        });
+    /// Default persistent location: `<data dir>/ccr`.
+    pub fn default_dir() -> PathBuf {
+        dirs_or_default().join("ccr")
+    }
 
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-
-        // Load existing entries
-        let entries: HashMap<String, CcrEntry> = if path.exists() {
-            match fs::read_to_string(&path) {
-                Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-                Err(e) => {
-                    warn!("CCR load failed (starting fresh): {}", e);
-                    HashMap::new()
-                }
-            }
-        } else {
-            HashMap::new()
-        };
-
-        info!(
-            "CCR store opened at {} ({} entries)",
-            path.display(),
-            entries.len()
-        );
-
+    /// Opens (creating if needed) the persistent store at `dir`, or [`Self::default_dir`].
+    pub fn open(dir: Option<PathBuf>) -> Result<Self, String> {
+        let dir = dir.unwrap_or_else(Self::default_dir);
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("CCR store dir {} unavailable: {}", dir.display(), e))?;
+        info!("CCR store opened at {}", dir.display());
         Ok(Self {
-            inner: Arc::new(Mutex::new(CcrInner {
-                entries,
-                file_states: HashMap::new(),
-                db_path: Some(path),
-                dirty: false,
-            })),
+            backend: Backend::Dir(dir),
         })
     }
 
-    /// Opens an in-memory CCR store (for testing).
+    /// Opens an in-memory store (tests, or fallback when the data dir is unavailable).
     pub fn open_in_memory() -> Result<Self, String> {
         Ok(Self {
-            inner: Arc::new(Mutex::new(CcrInner {
-                entries: HashMap::new(),
-                file_states: HashMap::new(),
-                db_path: None,
-                dirty: false,
-            })),
+            backend: Backend::Memory(Mutex::new(HashMap::new())),
         })
     }
 
-    /// Gets the most recent state of a file from the session cache for Contextual Delta Encoding.
-    pub fn get_file_state(&self, path: &str) -> Option<String> {
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner.file_states.get(path).cloned()
-    }
-
-    /// Saves the most recent state of a file in the session cache.
-    pub fn set_file_state(&self, path: &str, content: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        inner
-            .file_states
-            .insert(path.to_string(), content.to_string());
-    }
-
-    /// Compute the content-addressed handle for a byte slice: `ccr:<sha256_hex>`.
+    /// Computes the content-addressed handle for a byte slice: `ccr:<sha256_hex>`.
     pub fn handle(content: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(content);
-        let hash = hasher.finalize();
-        format!("ccr:{}", hex::encode(hash))
+        let hash = Sha256::digest(content);
+        format!("{}{}", HANDLE_PREFIX, hex::encode(hash))
     }
 
-    /// Store content under its content-addressed handle. Returns the handle.
+    /// Returns the hex digest of a well-formed handle (`ccr:` + 64 lowercase hex chars).
+    /// Handles arrive from model output, so anything else is rejected before touching disk.
+    fn digest_of(handle: &str) -> Option<&str> {
+        let digest = handle.trim().strip_prefix(HANDLE_PREFIX)?;
+        let valid = digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        valid.then_some(digest)
+    }
+
+    /// Stores content under its handle and returns the handle. Idempotent.
     pub fn store(&self, content: &[u8], content_type: &str) -> Result<String, String> {
         let handle = Self::handle(content);
-        let size = content.len();
-
-        let mut inner = self.inner.lock().map_err(|e| format!("CCR lock: {}", e))?;
-
-        // Content-addressed: if already stored, skip
-        if inner.entries.contains_key(&handle) {
-            debug!("CCR dedup hit: {} ({} bytes)", handle, size);
-            return Ok(handle);
+        match &self.backend {
+            Backend::Memory(map) => {
+                let mut map = map.lock().map_err(|e| format!("CCR lock: {}", e))?;
+                map.entry(handle.clone())
+                    .or_insert_with(|| content.to_vec());
+            }
+            Backend::Dir(dir) => {
+                let digest = Self::digest_of(&handle).expect("handle() is well-formed");
+                let path = dir.join(digest);
+                if !path.exists() {
+                    write_atomically(dir, &path, content)?;
+                    debug!(
+                        "CCR stored: {} ({} bytes, type={})",
+                        handle,
+                        content.len(),
+                        content_type
+                    );
+                }
+            }
         }
-
-        // Base64 encode the content for JSON-safe storage
-        let content_b64 = crate::base64::encode(content);
-
-        inner.entries.insert(
-            handle.clone(),
-            CcrEntry {
-                content_b64,
-                content_type: content_type.to_string(),
-                created_at: now_secs(),
-                access_count: 0,
-                size_bytes: size,
-            },
-        );
-        inner.dirty = true;
-
-        // Flush every 10 new entries to avoid data loss
-        if inner.entries.len() % 10 == 0 {
-            inner.flush();
-        }
-
-        debug!(
-            "CCR stored: {} ({} bytes, type={})",
-            handle, size, content_type
-        );
         Ok(handle)
     }
 
-    /// Retrieve content by handle. Returns None if not found.
+    /// Retrieves content by handle. Returns `Ok(None)` for unknown or malformed handles.
     pub fn retrieve(&self, handle: &str) -> Result<Option<Vec<u8>>, String> {
-        let mut inner = self.inner.lock().map_err(|e| format!("CCR lock: {}", e))?;
-
-        if let Some(entry) = inner.entries.get(handle) {
-            let bytes = crate::base64::decode(&entry.content_b64);
-            debug!("CCR hit: {} ({} bytes)", handle, bytes.len());
-            // Bump access count after we're done reading
-            if let Some(entry_mut) = inner.entries.get_mut(handle) {
-                entry_mut.access_count += 1;
+        let Some(digest) = Self::digest_of(handle) else {
+            warn!("CCR rejected malformed handle");
+            return Ok(None);
+        };
+        match &self.backend {
+            Backend::Memory(map) => {
+                let map = map.lock().map_err(|e| format!("CCR lock: {}", e))?;
+                Ok(map.get(&format!("{}{}", HANDLE_PREFIX, digest)).cloned())
             }
-            inner.dirty = true;
-            Ok(Some(bytes))
-        } else {
-            warn!("CCR miss: {}", handle);
-            Ok(None)
+            Backend::Dir(dir) => match fs::read(dir.join(digest)) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    warn!("CCR miss: {}", handle);
+                    Ok(None)
+                }
+                Err(e) => Err(format!("CCR read {}: {}", handle, e)),
+            },
         }
     }
 
-    /// Count of stored entries.
+    /// Number of stored entries.
     pub fn count(&self) -> usize {
-        self.inner.lock().map(|i| i.entries.len()).unwrap_or(0)
+        match &self.backend {
+            Backend::Memory(map) => map.lock().map(|m| m.len()).unwrap_or(0),
+            Backend::Dir(dir) => entry_files(dir).count(),
+        }
     }
 
     /// Total original bytes stored.
     pub fn total_bytes(&self) -> u64 {
-        self.inner
-            .lock()
-            .map(|i| i.entries.values().map(|e| e.size_bytes as u64).sum())
-            .unwrap_or(0)
+        match &self.backend {
+            Backend::Memory(map) => map
+                .lock()
+                .map(|m| m.values().map(|v| v.len() as u64).sum())
+                .unwrap_or(0),
+            Backend::Dir(dir) => entry_files(dir)
+                .filter_map(|p| fs::metadata(p).ok())
+                .map(|m| m.len())
+                .sum(),
+        }
     }
 
-    /// Garbage-collect entries older than `max_age_secs` that have never been accessed.
+    /// Deletes persistent entries not modified within `max_age_secs`. Returns the count removed.
+    /// Content is addressed by hash, so an old entry that is still referenced in a live
+    /// conversation is simply re-stored the next time that conversation is compressed.
     pub fn gc(&self, max_age_secs: u64) -> usize {
-        let now = now_secs();
-        let mut inner = match self.inner.lock() {
-            Ok(i) => i,
-            Err(e) => {
-                error!("CCR gc lock: {}", e);
-                return 0;
-            }
+        let Backend::Dir(dir) = &self.backend else {
+            return 0;
         };
-
-        let before = inner.entries.len();
-        inner.entries.retain(|_, entry| {
-            !(entry.access_count == 0 && now.saturating_sub(entry.created_at) > max_age_secs)
-        });
-        let deleted = before - inner.entries.len();
-
-        if deleted > 0 {
-            inner.dirty = true;
-            inner.flush();
-            info!("CCR gc: purged {} stale entries", deleted);
+        let Some(cutoff) = SystemTime::now().checked_sub(Duration::from_secs(max_age_secs)) else {
+            return 0;
+        };
+        let removed = entry_files(dir)
+            .filter(|p| {
+                fs::metadata(p)
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t < cutoff)
+            })
+            .filter(|p| fs::remove_file(p).is_ok())
+            .count();
+        if removed > 0 {
+            info!("CCR gc: purged {} stale entries", removed);
         }
-        deleted
-    }
-
-    /// Force flush to disk.
-    pub fn flush(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.flush();
-        }
+        removed
     }
 }
 
-impl Drop for CcrStore {
-    fn drop(&mut self) {
-        self.flush();
+/// Lists entry files (named by 64-char hex digest) in the store directory.
+fn entry_files(dir: &Path) -> impl Iterator<Item = PathBuf> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit()))
+        })
+}
+
+/// Writes via a temp file + rename so a concurrent reader never sees a partial entry.
+fn write_atomically(dir: &Path, path: &Path, content: &[u8]) -> Result<(), String> {
+    let tmp = dir.join(format!(
+        ".tmp-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let result = fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(content).and_then(|_| f.sync_all()))
+        .and_then(|_| fs::rename(&tmp, path));
+    if let Err(e) = result {
+        let _ = fs::remove_file(&tmp);
+        // A concurrent writer may have stored the same content first; that is success.
+        if path.exists() {
+            return Ok(());
+        }
+        return Err(format!("CCR write {}: {}", path.display(), e));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("retoken-ccr-test-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn dir_store_round_trip_and_visible_to_second_instance() {
+        let dir = temp_dir("roundtrip");
+        let writer = CcrStore::open(Some(dir.clone())).unwrap();
+        let handle = writer.store(b"original output", "log").unwrap();
+
+        // A separate store instance (e.g. the MCP server process) sees it immediately.
+        let reader = CcrStore::open(Some(dir.clone())).unwrap();
+        assert_eq!(
+            reader.retrieve(&handle).unwrap().as_deref(),
+            Some(&b"original output"[..])
+        );
+        assert_eq!(reader.count(), 1);
+        assert_eq!(reader.total_bytes(), 15);
+
+        // Idempotent
+        assert_eq!(writer.store(b"original output", "log").unwrap(), handle);
+        assert_eq!(reader.count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn malformed_handles_never_touch_the_filesystem() {
+        let dir = temp_dir("malformed");
+        let store = CcrStore::open(Some(dir.clone())).unwrap();
+        for bad in [
+            "ccr:../../etc/passwd",
+            "ccr:",
+            "nothex",
+            "ccr:ZZ",
+            &format!("ccr:{}", "A".repeat(64)),
+            &format!("ccr:{}/x", "a".repeat(63)),
+        ] {
+            assert_eq!(store.retrieve(bad).unwrap(), None, "{bad}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gc_removes_only_stale_entries() {
+        let dir = temp_dir("gc");
+        let store = CcrStore::open(Some(dir.clone())).unwrap();
+        store.store(b"fresh", "log").unwrap();
+        assert_eq!(store.gc(3600), 0);
+        assert_eq!(store.count(), 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

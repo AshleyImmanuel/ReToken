@@ -1,11 +1,9 @@
 pub mod anomaly;
-pub mod base64;
 pub mod ccr;
-pub mod delta;
+pub mod code_outline;
 pub mod inject;
 pub mod json;
 pub mod logs;
-pub mod minify;
 pub mod pipeline;
-pub mod process;
 pub mod stats;
+pub mod tool_output;

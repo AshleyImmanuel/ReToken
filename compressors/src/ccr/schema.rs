@@ -3,7 +3,7 @@
 pub fn ccr_tool_schema() -> serde_json::Value {
     serde_json::json!({
         "name": "retoken_retrieve",
-        "description": "Fetch original data for a given ccr:... handle.",
+        "description": "Fetch the full original of tool output that ReToken elided, by its ccr:... handle.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -17,7 +17,10 @@ pub fn ccr_tool_schema() -> serde_json::Value {
     })
 }
 
-/// Returns the recovery marker string for embedding in compressed payloads.
-pub fn ccr_marker(handle: &str) -> String {
-    format!("<<ccr:{}>>", handle.strip_prefix("ccr:").unwrap_or(handle))
+/// Recovery marker embedded where content was elided. Names the exact tool the model can
+/// call, so recovery works whether the tool is proxy-injected or provided by an MCP client.
+pub fn ccr_marker(handle: &str, tool: &str) -> String {
+    format!(
+        "[ReToken: full original elided; call `{tool}` with handle \"{handle}\" to retrieve it]"
+    )
 }
