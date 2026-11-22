@@ -12,6 +12,7 @@ pub struct CompressionStats {
     pub json_arrays_collapsed: usize,
     pub duplicates_removed: usize,
     pub code_outlines: usize,
+    pub json_minified: usize,
     /// True if a fresh tool result will be replaced next turn (a full read that becomes an
     /// outline): caching it would pay the cache-write premium for bytes that are discarded.
     pub volatile_tail: bool,

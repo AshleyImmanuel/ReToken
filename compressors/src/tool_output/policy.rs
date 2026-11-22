@@ -40,6 +40,28 @@ fn saves_enough(compressed: &str, original: &str) -> bool {
     (compressed.len() as f64) <= (original.len() as f64) * (1.0 - MIN_ELISION_SAVINGS)
 }
 
+/// Lossless: pretty-printed JSON from commands or MCP tools, re-serialized compactly (key
+/// order and numbers preserved). Never for file reads, whose exact text an edit may need.
+fn minify_json(
+    text: &str,
+    call: Option<&ToolCall>,
+    stats: &mut CompressionStats,
+) -> Option<String> {
+    if call.is_some_and(is_file_read) || !text.contains("\n ") {
+        return None;
+    }
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    if !(value.is_array() || value.is_object()) {
+        return None;
+    }
+    let compact = serde_json::to_string(&value).ok()?;
+    if compact.len() as f64 > text.len() as f64 * 0.9 {
+        return None;
+    }
+    stats.json_minified += 1;
+    Some(compact)
+}
+
 /// Threshold in bytes for content to be eligible for lossy elision.
 pub fn ccr_size_threshold() -> usize {
     std::env::var("RETOKEN_CCR_SIZE_THRESHOLD")
@@ -100,7 +122,9 @@ impl<'a> OutputPolicy<'a> {
             let first_call = first.call.clone();
             return Some(self.duplicate_marker(text, &handle, first_call.as_deref(), stats));
         }
-        let replacement = self.elide(text, ctx, stats);
+        let replacement = self
+            .elide(text, ctx, stats)
+            .or_else(|| minify_json(text, call, stats));
         self.seen.insert(
             handle,
             FirstCopy {

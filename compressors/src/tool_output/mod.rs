@@ -412,6 +412,38 @@ mod tests {
     }
 
     #[test]
+    fn pretty_json_from_commands_is_minified_losslessly() {
+        let store = CcrStore::open_in_memory().unwrap();
+        let items: Vec<Value> = (0..40)
+            .map(|i| json!({"zeta": i, "name": format!("item-{i}"), "tags": ["a", "b"]}))
+            .collect();
+        let value = json!({"zeta": [1, 2, {"big": 123456789012345678901234567890u128.to_string()}],
+                           "alpha": items});
+        let pretty = serde_json::to_string_pretty(&value).unwrap();
+        let mut body = json!({"messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "j1", "name": "Bash", "input": {"command": "gh api repos/x"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "j1", "content": pretty.clone()}]}
+        ]});
+        let stats = run(&mut body, &store, None);
+        let sent = body["messages"][1]["content"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(sent.len() < pretty.len());
+        assert_eq!(
+            serde_json::from_str::<Value>(sent).unwrap(),
+            value,
+            "lossless"
+        );
+        assert!(
+            sent.find("zeta").unwrap() < sent.find("alpha").unwrap(),
+            "key order kept"
+        );
+        assert_eq!(stats.json_minified, 1);
+    }
+
+    #[test]
     fn stale_reads_stay_verbatim_without_a_retrieval_route() {
         let store = CcrStore::open_in_memory().unwrap();
         let file = source_file();
