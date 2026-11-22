@@ -1,14 +1,63 @@
 <div align="center">
-  <h1>ReToken</h1>
-  <p><strong>Low-Overhead Local Proxy for Agentic Workflows & Coding Assistants</strong></p>
+  <h1>ReToken: Cut Claude Code and Coding-Agent Token Costs</h1>
+  <p><strong>A local Rust proxy that lowers LLM API bills for Claude Code, opencode, Cursor, Aider and other coding agents, without hiding what the model is reading.</strong></p>
+
+  <p>
+    <a href="https://github.com/AshleyImmanuel/ReToken/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/AshleyImmanuel/ReToken/actions/workflows/ci.yml/badge.svg"></a>
+    <a href="https://github.com/AshleyImmanuel/ReToken/releases"><img alt="Release" src="https://img.shields.io/github/v/release/AshleyImmanuel/ReToken"></a>
+    <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+    <img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-orange.svg">
+  </p>
 </div>
 
 ---
 
-> [!NOTE]
-> **ReToken** is a low-overhead local wire proxy written in Rust that sits between your AI coding assistants (Cursor, Windsurf, RooCode, Claude Code) and upstream LLM providers (Anthropic, OpenAI, etc.). ReToken operates transparently on the wire to reduce token usage and cost through structural heuristics, exact-hash request caching, Contextual Compression and Retrieval (CCR) for supported flows, and safe stream passthrough.
+**ReToken is a free, open-source local proxy that reduces the token cost of AI coding agents.** It runs on `127.0.0.1:8888` between your agent (Claude Code, opencode, Cursor, Windsurf, RooCode, Aider, Codex) and the model provider (Anthropic, OpenAI or any compatible endpoint). It compresses tool output, places prompt-cache breakpoints, and optionally asks for terse replies. Your prompts, code and API keys stay on your machine and are forwarded only to the provider you already use.
 
-## Core Features (MVP)
+## Quick Start
+
+```bash
+git clone https://github.com/AshleyImmanuel/ReToken.git && cd ReToken
+cargo install --path cli              # installs `retoken` into ~/.cargo/bin
+claude mcp add retoken -- retoken mcp # lets ReToken shorten large output safely
+retoken wrap claude                   # starts the proxy and runs Claude Code through it
+```
+
+Prefer to let your AI agent set it up? Ask it: *"Read AI_INSTALL.md in https://github.com/AshleyImmanuel/ReToken and integrate ReToken after showing me what will change."* See [`AI_INSTALL.md`](AI_INSTALL.md) for every setting.
+
+## How Much Does ReToken Save?
+
+ReToken saved 29% against calling the API directly in a headless Claude Code benchmark (Claude Sonnet, Claude Code 2.1, November 2026). Each arm ran 3 tasks (explain code, fix a failing test, summarize a module) 3 times from a clean checkout; all 36 runs answered correctly.
+
+| Setup | Cost per task | Turns | Seconds | Output tokens |
+|---|---|---|---|---|
+| Direct to the API | $0.0425 | 4.78 | 12.7 | 859 |
+| caveman proxy | $0.0330 | 4.33 | 13.4 | 870 |
+| ReToken | $0.0329 | 4.33 | 12.8 | 826 |
+| **ReToken + terse mode** | **$0.0302** | **3.78** | **11.4** | **719** |
+
+On a single larger multi-file task, ReToken + terse cost $0.264 against $0.452 direct (42% lower). Savings grow with session length and tool-output size; these are small samples, so treat them as indicative.
+
+## How ReToken Works
+
+1. **Never hides what the model is reading.** A file read reaches the model in full on the turn it is read. Only once the model has moved on does a large file shrink to an outline (signatures, types, exact line numbers) with a handle to the original.
+2. **Removes noise, keeps failures.** Large build, test and log output is shortened, but errors, assertion details and test summaries are always kept. Exact duplicate tool output is replaced by a reference to the earlier copy.
+3. **Everything lossy is recoverable.** The `retoken mcp` server gives the model a `retoken_retrieve` tool to fetch any original, filtered by pattern or line range.
+4. **Keeps prompt caches warm.** Each tool result changes at most once, and Anthropic cache breakpoints follow the client's TTL, so repeated history is billed at the cached rate.
+
+## FAQ
+
+**Does ReToken work with Claude Code subscriptions (Pro/Max)?** Yes. It forwards the client's own authorization headers, including Claude Code OAuth, and sets `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` so prompt caching and tool search keep working.
+
+**Does ReToken send my code anywhere else?** No. It listens on loopback only and forwards requests to the provider your agent already uses. Elided originals are stored locally under `<data dir>/ccr` and deleted after 7 days unused.
+
+**Will compression make the agent worse?** Lossy changes happen only when the agent has the `retoken_retrieve` tool to undo them, and fresh file reads are never shortened. Without the tool, ReToken applies only lossless changes.
+
+**How is ReToken different from a terse-prompt plugin?** Prompt plugins only shorten replies. ReToken also cuts input: tool output, duplicate reads and cache placement, which is most of an agent's bill. Its terse mode covers replies too.
+
+**Which providers and agents are supported?** Anthropic Messages and OpenAI Chat Completions/Responses wire formats, so Claude Code, opencode, Cursor, Windsurf, RooCode, Aider, Codex and OpenAI-compatible endpoints.
+
+## Features
 
 - **Lossless by Default, Savings On by Default**: User prompts, system instructions, assistant reasoning history, tool definitions, and code comments are never altered. Out of the box ReToken removes exact-duplicate tool output (lossless: the first copy stays in the conversation) and adds Anthropic prompt cache breakpoints, including a rolling breakpoint on the conversation tail, so repeated history is billed at the cached rate. Rewritten requests keep the client's JSON key order. Lossy elision only happens when your agent exposes the `retoken mcp` retrieval tool. Terse mode (`terse_mode`) and proxy-side CCR replay (`ccr_enabled`) stay opt-in; set `compression_enabled: false` and `prompt_caching_enabled: false` for literal pass-through.
 - **Zero-Tradeoff Prefix Optimization for OpenAI/Codex & Anthropic**: When `prompt_caching_enabled` is active, ReToken canonicalizes requests strictly losslessly: sorting OpenAI/Codex tools deterministically by function name and stabilizing system messages at index 0 (triggering automatic 50% discount prefix caching on `gpt-4o`/Codex), and placing ephemeral breakpoints on Anthropic (triggering 90% discount prompt caching). Zero code or text tokens are discarded.
@@ -152,6 +201,10 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 - **`analyzers` (Implemented)**: Comment-aware symbol scanner and module/symbol dependency graph resolution (relative paths, stem matching, exported symbols).
 - **`retrieval` (Experimental Scaffold)**: Context budgeting (`ContextPackage`), dependency-aware ranking (`ContextPlanner`), and cache breakpoint formatting (`packer`).
 - **`scheduler` (Experimental Scaffold)**: Tool call DAG scheduling (`ExecutionDag`), next-file prediction (`Prefetcher`), log virtualization (`slice_log`), and background task tracking (`TaskManager`). Containerized sandbox execution is a roadmap item.
+
+## Contributing
+
+Contributions are welcome, from bug reports to new compression strategies. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) to set up, find a first issue, and open a pull request. Good starting points are issues labelled `good first issue` and `help wanted`.
 
 ## License
 
