@@ -38,6 +38,15 @@ impl CcrStore {
         let dir = dir.unwrap_or_else(Self::default_dir);
         fs::create_dir_all(&dir)
             .map_err(|e| format!("CCR store dir {} unavailable: {}", dir.display(), e))?;
+        // Entries are raw tool output (file contents, command logs): owner-only access.
+        // On Windows the default location (%LOCALAPPDATA%) is already per-user.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)) {
+                warn!("CCR store dir {} not restricted: {}", dir.display(), e);
+            }
+        }
         info!("CCR store opened at {}", dir.display());
         Ok(Self {
             backend: Backend::Dir(dir),
@@ -80,7 +89,17 @@ impl CcrStore {
             Backend::Dir(dir) => {
                 let digest = Self::digest_of(&handle).expect("handle() is well-formed");
                 let path = dir.join(digest);
-                if !path.exists() {
+                if path.exists() {
+                    // Still in use: refresh the age `gc` judges by, so a live conversation's
+                    // originals are never purged while the model may still retrieve them.
+                    let touched = fs::File::options()
+                        .write(true)
+                        .open(&path)
+                        .and_then(|f| f.set_modified(SystemTime::now()));
+                    if let Err(e) = touched {
+                        debug!("CCR touch {}: {}", handle, e);
+                    }
+                } else {
                     write_atomically(dir, &path, content)?;
                     debug!(
                         "CCR stored: {} ({} bytes, type={})",
@@ -138,9 +157,9 @@ impl CcrStore {
         }
     }
 
-    /// Deletes persistent entries not modified within `max_age_secs`. Returns the count removed.
-    /// Content is addressed by hash, so an old entry that is still referenced in a live
-    /// conversation is simply re-stored the next time that conversation is compressed.
+    /// Deletes persistent entries not stored or re-stored within `max_age_secs`. Returns the
+    /// count removed. Every compression of a conversation re-stores its originals, so only
+    /// entries no live conversation references age out.
     pub fn gc(&self, max_age_secs: u64) -> usize {
         let Backend::Dir(dir) = &self.backend else {
             return 0;
@@ -254,6 +273,24 @@ mod tests {
         store.store(b"fresh", "log").unwrap();
         assert_eq!(store.gc(3600), 0);
         assert_eq!(store.count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn re_storing_an_entry_keeps_it_from_gc() {
+        let dir = temp_dir("gc-touch");
+        let store = CcrStore::open(Some(dir.clone())).unwrap();
+        let handle = store.store(b"still referenced", "log").unwrap();
+        let path = dir.join(CcrStore::digest_of(&handle).unwrap());
+        let old = SystemTime::now() - Duration::from_secs(10 * 3600);
+        let age = |p: &Path| fs::File::options().write(true).open(p)?.set_modified(old);
+        age(&path).unwrap();
+
+        store.store(b"still referenced", "log").unwrap();
+        assert_eq!(store.gc(3600), 0, "re-stored entry is fresh");
+
+        age(&path).unwrap();
+        assert_eq!(store.gc(3600), 1, "unreferenced entry ages out");
         let _ = fs::remove_dir_all(&dir);
     }
 }
