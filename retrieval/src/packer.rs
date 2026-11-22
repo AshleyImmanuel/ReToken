@@ -1,48 +1,4 @@
-use serde_json::Value;
-
-/// Reorganizes request messages for provider cache optimization and schema validity.
-///
-/// For Anthropic: extracts any misplaced "system" role messages from the `messages` array
-/// and merges them into the top-level "system" parameter.
-/// CRITICAL: Preserves the strict chronological ordering of user, assistant, and tool messages
-/// so multi-turn tool use conversations are not corrupted or invalidated.
-pub fn reorder_for_cache(request_body: &mut Value) {
-    let messages = match request_body
-        .get_mut("messages")
-        .and_then(|m| m.as_array_mut())
-    {
-        Some(m) => m,
-        None => return,
-    };
-
-    let mut system_contents = Vec::new();
-    let mut clean_messages = Vec::with_capacity(messages.len());
-
-    for msg in messages.drain(..) {
-        if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
-            if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-                system_contents.push(content.to_string());
-            }
-        } else {
-            clean_messages.push(msg);
-        }
-    }
-
-    *messages = clean_messages;
-
-    if !system_contents.is_empty() {
-        if let Some(obj) = request_body.as_object_mut() {
-            let combined = system_contents.join("\n\n");
-            if let Some(existing_sys) = obj.get_mut("system") {
-                if let Some(s) = existing_sys.as_str() {
-                    *existing_sys = serde_json::json!(format!("{}\n\n{}", s, combined));
-                }
-            } else {
-                obj.insert("system".to_string(), serde_json::json!(combined));
-            }
-        }
-    }
-}
+use serde_json::{json, Value};
 
 /// Injects Anthropic prompt caching breakpoints (`cache_control: {"type": "ephemeral"}`).
 ///
@@ -52,23 +8,41 @@ pub fn reorder_for_cache(request_body: &mut Value) {
 ///    rate for everything but the newest turn.
 /// 2. A breakpoint on the system prompt, which stays valid even when the history changes.
 ///
+/// `tail_volatile`: the fresh tail (messages after the last assistant turn) will be rewritten
+/// on the next request, e.g. a full file read that becomes an outline. Caching it would pay
+/// the cache-write premium (1.25x, or 2x for 1h TTL) for bytes that are thrown away, so its
+/// breakpoints, including the client's, move to the last assistant message instead and the
+/// tail is billed as plain input (1x).
+///
 /// Existing client breakpoints are respected: nothing is added beyond Anthropic's limit of 4,
-/// and a message that already carries a breakpoint is left alone.
+/// a message that already carries a breakpoint is left alone, and new markers copy the
+/// client's TTL (Anthropic rejects a shorter-TTL breakpoint before a longer one).
 ///
 /// In Anthropic's API, `cache_control` MUST be placed on a content block (inside `system` or inside
 /// a `messages` content array), NEVER directly as a root attribute of a message object.
-pub fn inject_cache_breakpoint(request_body: &mut Value) {
+pub fn inject_cache_breakpoint(request_body: &mut Value, tail_volatile: bool) {
+    let marker = client_marker(request_body).unwrap_or_else(|| json!({"type": "ephemeral"}));
+    if tail_volatile {
+        strip_fresh_tail_breakpoints(request_body);
+    }
     let mut budget =
         MAX_ANTHROPIC_CACHE_BREAKPOINTS.saturating_sub(count_cache_breakpoints(request_body));
 
     if budget > 0 {
-        let last_content = request_body
+        let messages = request_body
             .get_mut("messages")
-            .and_then(|m| m.as_array_mut())
-            .and_then(|msgs| msgs.last_mut())
-            .and_then(|msg| msg.get_mut("content"));
-        if let Some(content) = last_content {
-            if mark_last_block(content) {
+            .and_then(|m| m.as_array_mut());
+        let target = messages.and_then(|msgs| {
+            if tail_volatile {
+                msgs.iter_mut()
+                    .rev()
+                    .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            } else {
+                msgs.last_mut()
+            }
+        });
+        if let Some(content) = target.and_then(|msg| msg.get_mut("content")) {
+            if mark_last_block(content, &marker) {
                 budget -= 1;
             }
         }
@@ -76,18 +50,74 @@ pub fn inject_cache_breakpoint(request_body: &mut Value) {
 
     if budget > 0 {
         if let Some(system) = request_body.get_mut("system") {
-            mark_last_block(system);
+            mark_last_block(system, &marker);
         }
     }
 }
 
-/// Puts a breakpoint on the last cacheable block of `content` (a string is converted to a text
+/// A marker for new breakpoints that matches the client's TTL (preferring the longest it uses).
+/// Only `type` and `ttl` are copied: other fields such as `scope: "global"` are valid only on
+/// the block the client put them on, and Anthropic rejects them elsewhere.
+fn client_marker(request_body: &Value) -> Option<Value> {
+    let mut ttls: Vec<Option<String>> = Vec::new();
+    let mut collect = |v: Option<&Value>| {
+        for block in v.and_then(|v| v.as_array()).into_iter().flatten() {
+            if let Some(m) = block.get("cache_control") {
+                ttls.push(m.get("ttl").and_then(|t| t.as_str()).map(str::to_string));
+            }
+        }
+    };
+    collect(request_body.get("tools"));
+    collect(request_body.get("system"));
+    for msg in request_body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .into_iter()
+        .flatten()
+    {
+        collect(msg.get("content"));
+    }
+    if ttls.is_empty() {
+        return None;
+    }
+    let ttl = ttls
+        .iter()
+        .flatten()
+        .find(|t| t.as_str() == "1h")
+        .or_else(|| ttls.iter().flatten().next());
+    Some(match ttl {
+        Some(ttl) => json!({"type": "ephemeral", "ttl": ttl}),
+        None => json!({"type": "ephemeral"}),
+    })
+}
+
+/// Removes breakpoints from messages after the last assistant turn.
+fn strip_fresh_tail_breakpoints(request_body: &mut Value) {
+    let Some(msgs) = request_body
+        .get_mut("messages")
+        .and_then(|m| m.as_array_mut())
+    else {
+        return;
+    };
+    let last_assistant = msgs
+        .iter()
+        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"));
+    let tail_start = last_assistant.map_or(0, |i| i + 1);
+    for msg in &mut msgs[tail_start..] {
+        if let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for block in blocks.iter_mut().filter_map(|b| b.as_object_mut()) {
+                block.remove("cache_control");
+            }
+        }
+    }
+}
+
+/// Puts `marker` on the last cacheable block of `content` (a string is converted to a text
 /// block). Returns true if a breakpoint was added. Content that already has one is left alone.
-fn mark_last_block(content: &mut Value) -> bool {
-    let marker = serde_json::json!({"type": "ephemeral"});
+fn mark_last_block(content: &mut Value, marker: &Value) -> bool {
     match content {
         Value::String(text) if !text.is_empty() => {
-            *content = serde_json::json!([
+            *content = json!([
                 {"type": "text", "text": std::mem::take(text), "cache_control": marker}
             ]);
             true
@@ -108,7 +138,7 @@ fn mark_last_block(content: &mut Value) -> bool {
             });
             match target.and_then(|b| b.as_object_mut()) {
                 Some(block) => {
-                    block.insert("cache_control".to_string(), marker);
+                    block.insert("cache_control".to_string(), marker.clone());
                     true
                 }
                 None => false,
@@ -250,50 +280,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn test_reorder_for_cache_preserves_conversation_and_tool_order() {
-        let mut body = json!({
-            "messages": [
-                {"role": "user", "content": "turn 1"},
-                {"role": "assistant", "content": "calling tool"},
-                {"role": "tool", "content": "tool result 1"},
-                {"role": "user", "content": "turn 2"}
-            ]
-        });
-
-        reorder_for_cache(&mut body);
-
-        let msgs = body["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 4);
-        assert_eq!(msgs[0]["role"], "user");
-        assert_eq!(msgs[1]["role"], "assistant");
-        assert_eq!(msgs[2]["role"], "tool");
-        assert_eq!(msgs[3]["role"], "user");
-    }
-
-    #[test]
-    fn test_reorder_for_cache_extracts_system_messages_to_top_level() {
-        let mut body = json!({
-            "system": "Initial system",
-            "messages": [
-                {"role": "system", "content": "Extra system"},
-                {"role": "user", "content": "hello"}
-            ]
-        });
-
-        reorder_for_cache(&mut body);
-
-        // System role message removed from messages
-        let msgs = body["messages"].as_array().unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0]["role"], "user");
-
-        // Merged into top-level system
-        let sys = body["system"].as_str().unwrap();
-        assert!(sys.contains("Initial system"));
-        assert!(sys.contains("Extra system"));
-    }
-
-    #[test]
     fn test_inject_cache_breakpoint_anthropic_format() {
         let mut body = json!({
             "system": "You are a helpful assistant",
@@ -302,7 +288,7 @@ mod tests {
             ]
         });
 
-        inject_cache_breakpoint(&mut body);
+        inject_cache_breakpoint(&mut body, false);
 
         // System should now be an array of blocks with cache_control
         let sys = body["system"].as_array().unwrap();
@@ -334,7 +320,7 @@ mod tests {
                 ]}
             ]
         });
-        inject_cache_breakpoint(&mut body);
+        inject_cache_breakpoint(&mut body, false);
         let last = &body["messages"][2]["content"];
         assert_eq!(
             last[0]["cache_control"]["type"], "ephemeral",
@@ -349,6 +335,54 @@ mod tests {
     }
 
     #[test]
+    fn test_volatile_tail_is_billed_as_plain_input() {
+        // Claude Code style: 1h markers on system and on the newest tool result.
+        let hour = json!({"type": "ephemeral", "ttl": "1h"});
+        let mut body = json!({
+            "system": [{"type": "text", "text": "sys", "cache_control": hour}],
+            "messages": [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "full file",
+                     "cache_control": hour}
+                ]}
+            ]
+        });
+        inject_cache_breakpoint(&mut body, true);
+        assert!(body["messages"][2]["content"][0]
+            .get("cache_control")
+            .is_none());
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"], hour,
+            "same TTL"
+        );
+        assert_eq!(count_cache_breakpoints(&body), 2);
+    }
+
+    #[test]
+    fn test_client_marker_scope_is_never_copied() {
+        // Claude Code marks system[0] with scope "global"; copying it to later blocks is a 400.
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "a",
+                 "cache_control": {"type": "ephemeral", "ttl": "1h", "scope": "global"}},
+                {"type": "text", "text": "b"}
+            ],
+            "messages": [{"role": "user", "content": "q"}]
+        });
+        inject_cache_breakpoint(&mut body, false);
+        let added = &body["messages"][0]["content"][0]["cache_control"];
+        assert_eq!(*added, json!({"type": "ephemeral", "ttl": "1h"}));
+        assert!(
+            body["system"][1].get("cache_control").is_none(),
+            "system already marked"
+        );
+    }
+
+    #[test]
     fn test_client_breakpoints_are_respected() {
         // Client (e.g. Claude Code) already caches the tail; only the system slot is added.
         let mut body = json!({
@@ -357,7 +391,7 @@ mod tests {
                 {"type": "text", "text": "q", "cache_control": {"type": "ephemeral"}}
             ]}]
         });
-        inject_cache_breakpoint(&mut body);
+        inject_cache_breakpoint(&mut body, false);
         assert_eq!(count_cache_breakpoints(&body), 2);
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     }
@@ -372,7 +406,7 @@ mod tests {
                 {"role": "user", "content": [marked.clone(), marked.clone(), marked]}
             ]
         });
-        inject_cache_breakpoint(&mut body);
+        inject_cache_breakpoint(&mut body, false);
         assert!(
             body["system"][0].get("cache_control").is_none(),
             "a 5th breakpoint must not be injected"

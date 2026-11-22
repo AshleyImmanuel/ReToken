@@ -5,5 +5,5 @@ pub mod packer;
 pub mod planner;
 
 pub use package::ContextPackage;
-pub use packer::{inject_cache_breakpoint, inject_terse_mode, reorder_for_cache};
+pub use packer::{inject_cache_breakpoint, inject_terse_mode};
 pub use planner::ContextPlanner;

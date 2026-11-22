@@ -68,8 +68,10 @@ pub fn optimize_payload(
     if config.prompt_caching_enabled {
         match format {
             WireFormat::Anthropic => {
-                packer::reorder_for_cache(json_body);
-                packer::inject_cache_breakpoint(json_body);
+                packer::inject_cache_breakpoint(
+                    json_body,
+                    pipeline_stats.as_ref().is_some_and(|s| s.volatile_tail),
+                );
             }
             WireFormat::OpenAI => {
                 packer::optimize_openai_prefix(json_body);

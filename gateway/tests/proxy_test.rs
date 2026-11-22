@@ -2071,3 +2071,65 @@ fn test_accept_encoding_is_not_forwarded() {
     assert!(out.get("x-retoken-cache").is_none());
     assert_eq!(out.get("x-api-key").unwrap(), "k");
 }
+
+#[tokio::test]
+async fn test_system_role_messages_with_block_content_are_forwarded_intact() {
+    // Claude Code sends a `role: "system"` message whose content is an array of blocks.
+    // It must reach the provider unchanged (an old reorder step silently deleted it).
+    let captured = Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null));
+    let cap = captured.clone();
+    let upstream = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let cap = cap.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *cap.lock().await = serde_json::from_slice(&bytes).unwrap();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    // Defaults: compression + prompt caching on.
+    let config = AppConfig {
+        anthropic_base_url: upstream_url,
+        allow_private_upstreams: true,
+        ..Default::default()
+    };
+    let app = gateway::app(config, ccr_store).unwrap();
+
+    let env_text = "# Environment\nPrimary working directory: /repo\n".repeat(50);
+    let body = serde_json::json!({
+        "model": "claude-x",
+        "system": [{"type": "text", "text": "base"}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "say hi"}]},
+            {"role": "system", "content": [{"type": "text", "text": env_text}]}
+        ]
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    assert_eq!(app.oneshot(req).await.unwrap().status(), 200);
+
+    let sent = captured.lock().await.clone();
+    let msgs = sent["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2, "no message dropped");
+    assert_eq!(msgs[1]["role"], "system");
+    assert_eq!(msgs[1]["content"][0]["text"], env_text, "content intact");
+}
