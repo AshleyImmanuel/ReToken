@@ -2133,3 +2133,145 @@ async fn test_system_role_messages_with_block_content_are_forwarded_intact() {
     assert_eq!(msgs[1]["role"], "system");
     assert_eq!(msgs[1]["content"][0]["text"], env_text, "content intact");
 }
+
+/// Counts `cache_control` markers anywhere in a request.
+fn cache_markers(v: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut stack = vec![v];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::Object(map) => {
+                if let Some(m) = map.get("cache_control") {
+                    out.push(m.clone());
+                }
+                stack.extend(map.values());
+            }
+            serde_json::Value::Array(items) => stack.extend(items),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn test_claude_code_shaped_request_survives_the_full_pipeline() {
+    // Pins the client details ReToken depends on, in the shape Claude Code sends them:
+    // global-scope 1h system breakpoint, a `role: "system"` message with block content,
+    // MCP tools deferred behind `ToolSearch` and named only in a reminder, 1h tail marker.
+    let captured = Arc::new(tokio::sync::Mutex::new(serde_json::Value::Null));
+    let cap = captured.clone();
+    let upstream = Router::new().route(
+        "/v1/messages",
+        post(move |req: Request<Body>| {
+            let cap = cap.clone();
+            async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                *cap.lock().await = serde_json::from_slice(&bytes).unwrap();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(Body::from(
+                        "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let config = AppConfig {
+        anthropic_base_url: upstream_url,
+        allow_private_upstreams: true,
+        compression_enabled: true,
+        ..Default::default()
+    };
+    let app = gateway::app(config, ccr_store.clone()).unwrap();
+
+    let hour = serde_json::json!({"type": "ephemeral", "ttl": "1h"});
+    let global = serde_json::json!({"type": "ephemeral", "ttl": "1h", "scope": "global"});
+    let mut log: String = (0..400)
+        .map(|i| format!("   Compiling dep_{i} v0.1.0\n"))
+        .collect();
+    log.push_str("error[E0425]: cannot find value `y`\n");
+    let env_text = "# Environment\nPrimary working directory: /repo\n";
+    let reminder = "<system-reminder>\nThe following deferred tools are now available via \
+                    ToolSearch:\nmcp__caveman__caveman_retrieve\nmcp__retoken__retoken_retrieve\n\
+                    </system-reminder>";
+    let body = serde_json::json!({
+        "model": "claude-x",
+        "stream": true,
+        "system": [
+            {"type": "text", "text": "You are Claude Code.", "cache_control": global},
+            {"type": "text", "text": "Tool rules."}
+        ],
+        "tools": [
+            {"name": "ToolSearch", "input_schema": {"type": "object"}},
+            {"name": "Read", "input_schema": {"type": "object"}},
+            {"name": "Bash", "input_schema": {"type": "object"}}
+        ],
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": reminder},
+                {"type": "text", "text": "fix the build"}
+            ]},
+            {"role": "system", "content": [{"type": "text", "text": env_text}]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "cargo build"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": log.clone(),
+                 "cache_control": hour}
+            ]}
+        ]
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.into_body().collect().await.unwrap();
+
+    let sent = captured.lock().await.clone();
+    let msgs = sent["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 4, "no message dropped");
+    assert_eq!(msgs[1]["role"], "system");
+    assert_eq!(msgs[1]["content"][0]["text"], env_text);
+
+    // Recovery goes through the deferred MCP tool; the proxy injects none of its own.
+    let sent_log = msgs[3]["content"][0]["content"].as_str().unwrap();
+    assert!(sent_log.len() < log.len() / 5, "log elided");
+    assert!(sent_log.contains("error[E0425]"), "failure kept");
+    assert!(sent_log.contains("mcp__retoken__retoken_retrieve"));
+    assert!(
+        sent_log.contains("ToolSearch"),
+        "marker says how to load it"
+    );
+    let handle = CcrStore::handle(log.as_bytes());
+    assert_eq!(
+        ccr_store.retrieve(&handle).unwrap().unwrap(),
+        log.as_bytes()
+    );
+    let tools = sent["tools"].as_array().unwrap();
+    assert!(!tools.iter().any(|t| t["name"] == "retoken_retrieve"));
+
+    // Breakpoints: within Anthropic's limit, all 1h (no shorter TTL before a longer one),
+    // and `scope` only where the client put it.
+    let markers = cache_markers(&sent);
+    assert!(markers.len() <= 4, "{markers:?}");
+    assert!(markers.iter().all(|m| m["ttl"] == "1h"), "{markers:?}");
+    assert_eq!(
+        markers.iter().filter(|m| m.get("scope").is_some()).count(),
+        1
+    );
+    assert_eq!(sent["system"][0]["cache_control"], global);
+}
