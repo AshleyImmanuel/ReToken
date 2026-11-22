@@ -3,6 +3,8 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+use super::classify::is_file_content_read;
+
 /// The tool invocation that produced a tool result.
 pub struct ToolCall {
     pub name: String,
@@ -52,12 +54,53 @@ impl ToolCall {
 #[derive(Default)]
 pub struct ToolCallIndex {
     calls: HashMap<String, ToolCall>,
+    /// For each call: how many file-content reads its assistant message issued together.
+    read_batch: HashMap<String, usize>,
+}
+
+/// Ids of the tool calls in an assistant message (Anthropic `tool_use` or OpenAI `tool_calls`).
+fn message_call_ids(assistant_msg: &Value) -> Vec<String> {
+    let blocks = assistant_msg
+        .get("content")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"));
+    let calls = assistant_msg
+        .get("tool_calls")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten();
+    blocks
+        .chain(calls)
+        .filter_map(|c| c.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .collect()
 }
 
 impl ToolCallIndex {
+    /// Records an assistant message's tool calls and how many file reads it issued at once.
+    pub fn record(&mut self, assistant_msg: &Value) {
+        self.record_calls(assistant_msg);
+        let ids = message_call_ids(assistant_msg);
+        let reads = ids
+            .iter()
+            .filter(|id| self.calls.get(*id).is_some_and(is_file_content_read))
+            .count();
+        for id in ids {
+            self.read_batch.insert(id, reads);
+        }
+    }
+
+    /// Number of file-content reads issued in the same assistant turn as this call.
+    pub fn read_batch_size(&self, id: Option<&str>) -> usize {
+        id.and_then(|id| self.read_batch.get(id))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Records the tool invocations of an assistant message: Anthropic `tool_use` content
     /// blocks or OpenAI `tool_calls`.
-    pub fn record(&mut self, assistant_msg: &Value) {
+    fn record_calls(&mut self, assistant_msg: &Value) {
         if let Some(blocks) = assistant_msg.get("content").and_then(|c| c.as_array()) {
             for block in blocks {
                 if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {

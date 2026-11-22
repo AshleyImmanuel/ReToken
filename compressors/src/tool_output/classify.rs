@@ -33,6 +33,22 @@ pub fn is_file_content_read(call: &ToolCall) -> bool {
     command_text(&call.input).is_some_and(|cmd| prints_file(&cmd))
 }
 
+/// True if the read asks for a specific line range (`offset`/`limit`, `start_line`, `sed -n`):
+/// the agent already knows what it needs, so the result is never outlined on arrival.
+pub fn is_ranged_read(call: &ToolCall) -> bool {
+    const RANGE_KEYS: &[&str] = &[
+        "offset",
+        "limit",
+        "start_line",
+        "end_line",
+        "line_start",
+        "line_end",
+        "view_range",
+    ];
+    RANGE_KEYS.iter().any(|k| call.input.get(*k).is_some())
+        || command_text(&call.input).is_some_and(|cmd| cmd.contains("sed -n"))
+}
+
 /// True if a pipeline segment's program prints file contents (`cat`, `sed -n`, `Get-Content`...).
 fn prints_file(cmd: &str) -> bool {
     const FILE_PRINTERS: &[&str] = &[

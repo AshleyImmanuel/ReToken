@@ -28,8 +28,8 @@ use serde_json::Value;
 
 use crate::ccr::CcrStore;
 use crate::pipeline::CompressionStats;
-use calls::{ToolCall, ToolCallIndex};
-use policy::OutputPolicy;
+use calls::ToolCallIndex;
+use policy::{OutputPolicy, ResultContext, SURVEY_MIN_READS};
 
 /// Options for [`compress_messages`].
 pub struct CompressOptions<'a> {
@@ -64,9 +64,14 @@ pub fn compress_messages(
             "assistant" => calls.record(msg),
             // OpenAI tool result message
             "tool" => {
-                let call = calls.get(msg.get("tool_call_id").and_then(|id| id.as_str()));
+                let id = msg.get("tool_call_id").and_then(|id| id.as_str());
+                let ctx = ResultContext {
+                    call: calls.get(id),
+                    fresh,
+                    survey: calls.read_batch_size(id) >= SURVEY_MIN_READS,
+                };
                 if let Some(content) = msg.get_mut("content") {
-                    compress_content(content, call, fresh, &mut policy, stats);
+                    compress_content(content, &ctx, &mut policy, stats);
                 }
             }
             // Anthropic tool_result blocks inside user messages
@@ -78,9 +83,14 @@ pub fn compress_messages(
                     if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                         continue;
                     }
-                    let call = calls.get(block.get("tool_use_id").and_then(|id| id.as_str()));
+                    let id = block.get("tool_use_id").and_then(|id| id.as_str());
+                    let ctx = ResultContext {
+                        call: calls.get(id),
+                        fresh,
+                        survey: calls.read_batch_size(id) >= SURVEY_MIN_READS,
+                    };
                     if let Some(content) = block.get_mut("content") {
-                        compress_content(content, call, fresh, &mut policy, stats);
+                        compress_content(content, &ctx, &mut policy, stats);
                     }
                 }
             }
@@ -92,13 +102,12 @@ pub fn compress_messages(
 /// (only text blocks are touched).
 fn compress_content(
     content: &mut Value,
-    call: Option<&ToolCall>,
-    fresh: bool,
+    ctx: &ResultContext,
     policy: &mut OutputPolicy,
     stats: &mut CompressionStats,
 ) {
     let mut apply = |text: &mut String| {
-        if let Some(new) = policy.apply(text, call, fresh, stats) {
+        if let Some(new) = policy.apply(text, ctx, stats) {
             *text = new;
         }
     };
@@ -342,6 +351,64 @@ mod tests {
         );
         // Fresh re-read of content whose first copy was outlined: shown in full, not deduped.
         assert_eq!(t3["messages"][6]["content"][0]["content"], file);
+    }
+
+    /// One assistant turn reading `n` different files, all results fresh.
+    fn parallel_reads(n: usize, ranged: bool) -> (Value, Vec<String>) {
+        let files: Vec<String> = (0..n)
+            .map(|i| source_file().replace("func_", &format!("f{i}_")))
+            .collect();
+        let input = |i: usize| {
+            if ranged {
+                json!({"file_path": format!("src/m{i}.rs"), "offset": 1, "limit": 400})
+            } else {
+                json!({"file_path": format!("src/m{i}.rs")})
+            }
+        };
+        let uses: Vec<Value> = (0..n)
+            .map(|i| json!({"type": "tool_use", "id": format!("p{i}"), "name": "Read", "input": input(i)}))
+            .collect();
+        let results: Vec<Value> = (0..n)
+            .map(|i| json!({"type": "tool_result", "tool_use_id": format!("p{i}"), "content": files[i]}))
+            .collect();
+        let body = json!({"messages": [
+            {"role": "user", "content": "summarize each module"},
+            {"role": "assistant", "content": uses},
+            {"role": "user", "content": results}
+        ]});
+        (body, files)
+    }
+
+    #[test]
+    fn surveyed_reads_are_outlined_on_arrival_focused_reads_are_not() {
+        let store = CcrStore::open_in_memory().unwrap();
+        let tool = Some("retoken_retrieve");
+
+        let (mut survey, files) = parallel_reads(3, false);
+        let stats = run(&mut survey, &store, tool);
+        for (i, file) in files.iter().enumerate() {
+            let sent = survey["messages"][2]["content"][i]["content"]
+                .as_str()
+                .unwrap();
+            assert!(sent.len() < file.len() / 2, "survey read {i} outlined");
+            assert!(sent.contains(&format!("pub fn f{i}_7(x: u32) -> u32 {{")));
+        }
+        assert_eq!(stats.code_outlines, 3);
+        assert!(
+            !stats.volatile_tail,
+            "outlined now, nothing is rewritten next turn"
+        );
+
+        // Two reads in a turn: focused, shown in full, flagged as rewritten next turn.
+        let (mut focused, files) = parallel_reads(2, false);
+        let stats = run(&mut focused, &store, tool);
+        assert_eq!(focused["messages"][2]["content"][0]["content"], files[0]);
+        assert!(stats.volatile_tail);
+
+        // Ranged reads are deliberate even in a survey.
+        let (mut ranged, files) = parallel_reads(3, true);
+        run(&mut ranged, &store, tool);
+        assert_eq!(ranged["messages"][2]["content"][0]["content"], files[0]);
     }
 
     #[test]

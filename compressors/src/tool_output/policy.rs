@@ -6,13 +6,27 @@ use std::collections::HashMap;
 use tracing::{debug, warn};
 
 use super::calls::ToolCall;
-use super::classify::{is_command, is_file_content_read, is_file_read};
+use super::classify::{is_command, is_file_content_read, is_file_read, is_ranged_read};
 use super::CompressOptions;
 use crate::ccr::{ccr_marker, CcrStore};
 use crate::code_outline;
 use crate::json::compress_json_heuristic_tracked;
 use crate::logs::compress_logs;
 use crate::pipeline::CompressionStats;
+
+/// A turn that reads at least this many files at once is surveying: it needs the shape of
+/// each file, so large reads are outlined on arrival (focused reads stay verbatim).
+pub const SURVEY_MIN_READS: usize = 3;
+
+/// Where a tool result sits in the conversation.
+pub struct ResultContext<'c> {
+    /// The call that produced it, if known.
+    pub call: Option<&'c ToolCall>,
+    /// True while the model has not yet had a turn with this output.
+    pub fresh: bool,
+    /// True if its call was one of [`SURVEY_MIN_READS`]+ file reads in the same turn.
+    pub survey: bool,
+}
 
 /// Tool output smaller than this is never deduplicated (the marker would not pay off).
 const DEDUP_MIN_BYTES: usize = 512;
@@ -67,27 +81,26 @@ impl<'a> OutputPolicy<'a> {
     }
 
     /// Returns the replacement for one tool output text, or `None` to keep it verbatim.
-    /// `fresh` is true while the model has not yet had a turn with this output.
     pub fn apply(
         &mut self,
         text: &str,
-        call: Option<&ToolCall>,
-        fresh: bool,
+        ctx: &ResultContext,
         stats: &mut CompressionStats,
     ) -> Option<String> {
+        let call = ctx.call;
         if text.len() < DEDUP_MIN_BYTES {
             return None;
         }
         let handle = CcrStore::handle(text.as_bytes());
         if let Some(first) = self.seen.get(&handle) {
             // A fresh re-read of a file whose earlier copy was outlined must show the content.
-            if fresh && !first.verbatim && call.is_some_and(is_file_content_read) {
+            if ctx.fresh && !first.verbatim && call.is_some_and(is_file_content_read) {
                 return None;
             }
             let first_call = first.call.clone();
             return Some(self.duplicate_marker(text, &handle, first_call.as_deref(), stats));
         }
-        let replacement = self.elide(text, call, fresh, stats);
+        let replacement = self.elide(text, ctx, stats);
         self.seen.insert(
             handle,
             FirstCopy {
@@ -126,24 +139,26 @@ impl<'a> OutputPolicy<'a> {
     }
 
     /// Lossy, only with a retrieval route: large JSON or command output at first sight; large
-    /// file reads once stale (outlined). Searches and git output are never elided.
+    /// file reads once stale, or on arrival when surveyed (outlined). Searches and git output
+    /// are never elided.
     fn elide(
         &self,
         text: &str,
-        call: Option<&ToolCall>,
-        fresh: bool,
+        ctx: &ResultContext,
         stats: &mut CompressionStats,
     ) -> Option<String> {
+        let call = ctx.call;
         let tool = self.opts.retrieve_tool?;
         if text.len() < ccr_size_threshold() {
             return None;
         }
         if call.is_some_and(is_file_read) {
-            if fresh || !call.is_some_and(is_file_content_read) {
-                return None;
-            }
-            let outline = code_outline::outline(text)?;
-            if !saves_enough(&outline, text) {
+            let read = call.filter(|c| is_file_content_read(c))?;
+            let outline = code_outline::outline(text).filter(|o| saves_enough(o, text))?;
+            let outline_now = !ctx.fresh || (ctx.survey && !is_ranged_read(read));
+            if !outline_now {
+                // Shown in full now, outlined next turn: not worth caching (see `volatile_tail`).
+                stats.volatile_tail = true;
                 return None;
             }
             stats.code_outlines += 1;
