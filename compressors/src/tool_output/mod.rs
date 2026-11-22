@@ -29,6 +29,8 @@ use serde_json::Value;
 use crate::ccr::CcrStore;
 use crate::pipeline::CompressionStats;
 use calls::ToolCallIndex;
+#[cfg(test)]
+use policy::OUTLINE_MIN_BYTES;
 use policy::{OutputPolicy, ResultContext, SURVEY_MIN_READS};
 
 /// Options for [`compress_messages`].
@@ -351,6 +353,29 @@ mod tests {
         );
         // Fresh re-read of content whose first copy was outlined: shown in full, not deduped.
         assert_eq!(t3["messages"][6]["content"][0]["content"], file);
+    }
+
+    #[test]
+    fn stale_ranged_and_small_reads_are_never_outlined() {
+        // Benchmark trace: outlining a ranged 3 KB read of store.rs made the agent re-read
+        // lines 60 and 98 it already had, costing two extra turns.
+        let store = CcrStore::open_in_memory().unwrap();
+        let tool = Some("mcp__retoken__retoken_retrieve");
+        let file = source_file();
+        assert!(file.len() >= OUTLINE_MIN_BYTES, "fixture is outline-sized");
+
+        let mut ranged = read_turns(&[file.clone(), file.replace("func_", "g_")]);
+        ranged["messages"][1]["content"][0]["input"] =
+            json!({"file_path": "src/lib.rs", "offset": 40, "limit": 300});
+        let stats = run(&mut ranged, &store, tool);
+        assert_eq!(ranged["messages"][2]["content"][0]["content"], file);
+        assert_eq!(stats.code_outlines, 0);
+
+        let small: String = file.chars().take(OUTLINE_MIN_BYTES - 1).collect();
+        let mut t = read_turns(&[small.clone(), file.replace("func_", "h_")]);
+        let stats = run(&mut t, &store, tool);
+        assert_eq!(t["messages"][2]["content"][0]["content"], small);
+        assert_eq!(stats.code_outlines, 0);
     }
 
     /// One assistant turn reading `n` different files, all results fresh.

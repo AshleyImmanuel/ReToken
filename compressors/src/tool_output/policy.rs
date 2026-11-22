@@ -28,6 +28,10 @@ pub struct ResultContext<'c> {
     pub survey: bool,
 }
 
+/// File reads smaller than this are never outlined (about 2k tokens): below it, the chance
+/// that the agent re-reads the file costs more than keeping it verbatim in a cached prefix.
+pub(crate) const OUTLINE_MIN_BYTES: usize = 8 * 1024;
+
 /// Tool output smaller than this is never deduplicated (the marker would not pay off).
 const DEDUP_MIN_BYTES: usize = 512;
 
@@ -177,9 +181,15 @@ impl<'a> OutputPolicy<'a> {
             return None;
         }
         if call.is_some_and(is_file_read) {
-            let read = call.filter(|c| is_file_content_read(c))?;
+            // A ranged read is the slice the agent chose; a small file costs little to keep.
+            // Outlining either makes the agent re-read lines it already had, and one extra
+            // turn re-sends the whole cached prefix: more than the outline ever saves.
+            let whole_read = call.is_some_and(|c| is_file_content_read(c) && !is_ranged_read(c));
+            if !whole_read || text.len() < OUTLINE_MIN_BYTES {
+                return None;
+            }
             let outline = code_outline::outline(text).filter(|o| saves_enough(o, text))?;
-            let outline_now = !ctx.fresh || (ctx.survey && !is_ranged_read(read));
+            let outline_now = !ctx.fresh || ctx.survey;
             if !outline_now {
                 // Shown in full now, outlined next turn: not worth caching (see `volatile_tail`).
                 stats.volatile_tail = true;
