@@ -57,14 +57,85 @@ pub fn inject_ccr_tool_for_provider(body: &mut Value, is_anthropic: bool) {
 /// Returns the name of a client-provided retrieval tool (e.g. the `retoken mcp` server, exposed
 /// as `mcp__retoken__retoken_retrieve` by Claude Code or `retoken_retoken_retrieve` by
 /// opencode), if the request's tool list contains one.
+///
+/// Clients with tool search (Claude Code with `ENABLE_TOOL_SEARCH`) defer MCP tools: they are
+/// not in `tools`, only named in a deferred-tools listing in the prompt, and the model loads
+/// them through `ToolSearch` before calling. Such a name counts too when a `ToolSearch` tool
+/// is present to load it.
 pub fn find_client_retrieve_tool(body: &Value) -> Option<String> {
-    body.get("tools")?.as_array()?.iter().find_map(|t| {
-        let name = t
-            .get("name")
+    let tools = body.get("tools").and_then(|t| t.as_array());
+    let tool_name = |t: &Value| {
+        t.get("name")
             .or_else(|| t.get("function").and_then(|f| f.get("name")))
-            .and_then(|n| n.as_str())?;
-        name.ends_with(crate::pipeline::PROXY_RETRIEVE_TOOL)
-            .then(|| name.to_string())
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+    };
+    let suffix = crate::pipeline::PROXY_RETRIEVE_TOOL;
+    if let Some(name) = tools
+        .into_iter()
+        .flatten()
+        .filter_map(tool_name)
+        .find(|n| n.ends_with(suffix))
+    {
+        return Some(name);
+    }
+    let has_tool_search = tools
+        .into_iter()
+        .flatten()
+        .filter_map(tool_name)
+        .any(|n| n == "ToolSearch");
+    if !has_tool_search {
+        return None;
+    }
+    prompt_texts(body).find_map(|t| deferred_tool_name(t, suffix))
+}
+
+/// Text the client wrote into the prompt: the top-level `system` and the text of `user` and
+/// `system` messages. Tool results and assistant turns are excluded: a file or reply that
+/// merely mentions the tool's name does not make it loadable.
+fn prompt_texts(body: &Value) -> impl Iterator<Item = &str> {
+    let messages = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|m| {
+            matches!(
+                m.get("role").and_then(|r| r.as_str()),
+                Some("user" | "system")
+            )
+        })
+        .filter_map(|m| m.get("content"));
+    body.get("system")
+        .into_iter()
+        .chain(messages)
+        .flat_map(content_texts)
+}
+
+/// The plain text of a content value: a string, or the `text` of its `type: "text"` blocks.
+fn content_texts(content: &Value) -> Vec<&str> {
+    match content {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Finds an MCP-style tool name (`mcp__server__..._retoken_retrieve`) listed in `text`.
+/// Deferred-tool listings put one name per line (optionally bulleted); a name inside prose,
+/// such as a user asking about the tool, is not a listing and does not count.
+fn deferred_tool_name(text: &str, suffix: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let name = line.trim();
+        let name = name.strip_prefix("- ").unwrap_or(name);
+        let is_name = name.starts_with("mcp__")
+            && name.ends_with(suffix)
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        is_name.then(|| name.to_string())
     })
 }
 
@@ -237,6 +308,59 @@ mod tests {
             None
         );
         assert_eq!(find_client_retrieve_tool(&json!({})), None);
+    }
+
+    #[test]
+    fn test_find_deferred_retrieve_tool_via_tool_search() {
+        let body = json!({
+            "tools": [{"name": "ToolSearch"}, {"name": "Read"}],
+            "messages": [{"role": "system", "content": [{"type": "text",
+                "text": "Deferred tools:\nmcp__caveman__caveman_retrieve\nmcp__retoken__retoken_retrieve\n"}]}]
+        });
+        assert_eq!(
+            find_client_retrieve_tool(&body).as_deref(),
+            Some("mcp__retoken__retoken_retrieve")
+        );
+        // Without ToolSearch the model could not load a merely-named tool.
+        let no_search = json!({"tools": [{"name": "Read"}], "messages": body["messages"].clone()});
+        assert_eq!(find_client_retrieve_tool(&no_search), None);
+    }
+
+    #[test]
+    fn test_retrieve_tool_named_only_in_tool_output_is_not_loadable() {
+        // Reading a file that mentions the tool must not enable elision.
+        let body = json!({
+            "tools": [{"name": "ToolSearch"}, {"name": "Read"}],
+            "messages": [
+                {"role": "user", "content": "explain inject.rs"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "uses mcp__retoken__retoken_retrieve"},
+                    {"type": "tool_use", "id": "r1", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "r1",
+                    "content": [{"type": "text", "text": "// mcp__retoken__retoken_retrieve"}]}]}
+            ]
+        });
+        assert_eq!(find_client_retrieve_tool(&body), None);
+    }
+
+    #[test]
+    fn test_retrieve_tool_named_in_prose_is_not_a_listing() {
+        // A user asking about the tool is not the client deferring it.
+        let body = json!({
+            "tools": [{"name": "ToolSearch"}],
+            "messages": [{"role": "user", "content":
+                "why does mcp__retoken__retoken_retrieve not show up?"}]
+        });
+        assert_eq!(find_client_retrieve_tool(&body), None);
+        let bulleted = json!({
+            "tools": [{"name": "ToolSearch"}],
+            "messages": [{"role": "user", "content":
+                "Deferred tools:\n- mcp__retoken__retoken_retrieve\n"}]
+        });
+        assert_eq!(
+            find_client_retrieve_tool(&bulleted).as_deref(),
+            Some("mcp__retoken__retoken_retrieve")
+        );
     }
 
     #[test]

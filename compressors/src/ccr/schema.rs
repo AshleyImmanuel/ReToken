@@ -21,6 +21,7 @@ pub fn ccr_tool_schema() -> serde_json::Value {
 /// call, so recovery works whether the tool is proxy-injected or provided by an MCP client.
 pub fn ccr_marker(handle: &str, tool: &str) -> String {
     format!(
-        "[ReToken: full original elided; call `{tool}` with handle \"{handle}\" to retrieve it]"
+        "[ReToken: full original elided; call `{tool}` with handle \"{handle}\" to retrieve it \
+         (if the tool is deferred, load it with ToolSearch first)]"
     )
 }
