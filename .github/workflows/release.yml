@@ -41,7 +41,11 @@ jobs:
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: ${{ matrix.target }}
+          target: ${{ matrix.target }}
+
+      # Cross targets (Intel macOS on Apple Silicon) need their standard library.
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
 
       - name: Build Release Binary
         run: cargo build --release -p cli --target ${{ matrix.target }}
