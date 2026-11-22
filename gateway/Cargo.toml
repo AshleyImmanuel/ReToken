@@ -11,11 +11,11 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+futures-util = { workspace = true }
 retrieval = { version = "0.1.0", path = "../retrieval" }
 analyzers = { version = "0.1.0", path = "../analyzers" }
 compressors = { version = "0.1.0", path = "../compressors" }
 serde = { workspace = true, features = ["derive"] }
-futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 http-body-util = "0.1.5"

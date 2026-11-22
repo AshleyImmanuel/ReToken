@@ -10,6 +10,7 @@ use tracing::info;
 use retoken_core::cache::ResponseCache;
 use retoken_core::config::AppConfig;
 
+pub mod block_reuse;
 pub mod bypass;
 pub mod handler;
 mod host_guard;

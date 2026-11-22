@@ -20,6 +20,10 @@ pub struct FlightRecord {
     /// Request bytes removed by ReToken's optimizations before forwarding.
     #[serde(default)]
     pub bytes_saved: usize,
+    /// Exact duplicate tool-output blocks removed while retaining an earlier full copy in the request.
+    pub block_reuse_blocks: usize,
+    /// Bytes removed by exact block reuse. This is bytes, not a provider-token estimate.
+    pub block_reuse_bytes_saved: usize,
     pub errors: usize,
     pub final_success: Option<bool>,
 }
@@ -43,6 +47,8 @@ impl Default for FlightRecord {
             compression_ratio: None,
             context_reduction: None,
             bytes_saved: 0,
+            block_reuse_blocks: 0,
+            block_reuse_bytes_saved: 0,
             errors: 0,
             final_success: None,
         }
@@ -63,6 +69,8 @@ pub struct FlightTelemetry {
     pub total_reasoning_tokens: u64,
     pub total_cache_hits: u64,
     pub total_cache_misses: u64,
+    pub total_block_reuse_blocks: u64,
+    pub total_block_reuse_bytes_saved: u64,
 }
 
 impl FlightTelemetry {
@@ -89,6 +97,8 @@ impl FlightTelemetry {
         }
         self.total_cache_hits += record.cache_hits as u64;
         self.total_cache_misses += record.cache_misses as u64;
+        self.total_block_reuse_blocks += record.block_reuse_blocks as u64;
+        self.total_block_reuse_bytes_saved += record.block_reuse_bytes_saved as u64;
     }
 }
 
@@ -108,5 +118,19 @@ mod tests {
             serde_json::from_str(&json).expect("deserialization should succeed");
         assert_eq!(deserialized.task_id, record.task_id);
         assert_eq!(deserialized.session_id, record.session_id);
+    }
+
+    #[test]
+    fn telemetry_accumulates_exact_block_reuse_separately_from_tokens() {
+        let mut record = FlightRecord::default();
+        record.block_reuse_blocks = 2;
+        record.block_reuse_bytes_saved = 4_096;
+
+        let mut telemetry = FlightTelemetry::new();
+        telemetry.record(&record);
+
+        assert_eq!(telemetry.total_block_reuse_blocks, 2);
+        assert_eq!(telemetry.total_block_reuse_bytes_saved, 4_096);
+        assert_eq!(telemetry.total_input_tokens, 0);
     }
 }

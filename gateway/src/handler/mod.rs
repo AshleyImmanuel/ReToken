@@ -28,9 +28,12 @@ use retoken_core::cache::ResponseCache;
 use retoken_core::config::AppConfig;
 use retoken_core::recorder::FlightRecord;
 
+use crate::block_reuse;
 use crate::bypass::forward_raw;
 use crate::optimizer;
-use crate::provider::{build_target_url, detect_provider, forwardable_request_headers, WireFormat};
+use crate::provider::{
+    build_target_url, detect_provider, forwardable_request_headers, Provider, WireFormat,
+};
 
 use self::cache::build_cache_hit_response;
 use self::request::RequestParams;
@@ -96,16 +99,31 @@ pub async fn handler(
     if let Some(model) = &params.model {
         record.model = model.clone();
     }
+    // The OpenAI Responses API carries structured tool and item payloads; its upstream prompt
+    // caching works without rewriting, so it is forwarded byte-for-byte unless exact block
+    // reuse folded a duplicate (then only that mutation is serialized).
+    let is_openai_responses =
+        provider == Provider::OpenAI && cache_policy::is_openai_responses_endpoint(path_and_query);
+    let block_reuse_applied = state.config.block_reuse_enabled
+        && json_body
+            .as_mut()
+            .is_some_and(|body_json| apply_block_reuse(body_json, bytes.len(), &mut record));
     let final_bytes = match json_body.as_mut() {
-        Some(body_json) if optimizations_active(&state.config) => optimizer::optimize_payload(
-            body_json,
-            bytes.len(),
-            format,
-            &state.config,
-            &mut record,
-            &state.ccr_store,
-            params.stream,
-        ),
+        Some(body_json) if is_openai_responses => match block_reuse_applied {
+            true => serde_json::to_vec(body_json).unwrap_or_else(|_| bytes.to_vec()),
+            false => bytes.to_vec(),
+        },
+        Some(body_json) if block_reuse_applied || optimizations_active(&state.config) => {
+            optimizer::optimize_payload(
+                body_json,
+                bytes.len(),
+                format,
+                &state.config,
+                &mut record,
+                &state.ccr_store,
+                params.stream,
+            )
+        }
         _ => bytes.to_vec(),
     };
 
@@ -195,6 +213,32 @@ pub async fn handler(
         &state.telemetry,
     )
     .await
+}
+
+/// Opt-in exact block reuse: replaces later exact copies of tool output with a pointer to
+/// the earlier full copy in the same request. Returns true if anything was folded.
+fn apply_block_reuse(
+    body_json: &mut serde_json::Value,
+    original_size: usize,
+    record: &mut FlightRecord,
+) -> bool {
+    let stats = block_reuse::reuse_exact_tool_outputs(body_json);
+    if stats.reused_blocks == 0 {
+        return false;
+    }
+    if original_size > 0 {
+        let reduced = original_size.saturating_sub(stats.bytes_saved);
+        let ratio = 1.0 - (reduced as f64 / original_size as f64);
+        record.context_reduction = Some(ratio);
+        record.compression_ratio = Some(ratio);
+    }
+    record.block_reuse_blocks = stats.reused_blocks;
+    record.block_reuse_bytes_saved = stats.bytes_saved;
+    info!(
+        "Exact block reuse saved {} bytes across {} duplicate tool outputs",
+        stats.bytes_saved, stats.reused_blocks
+    );
+    true
 }
 
 /// Bypass mode: `x-retoken-bypass` is present and not explicitly false/off.

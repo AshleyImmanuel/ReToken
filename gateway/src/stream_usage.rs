@@ -133,4 +133,59 @@ mod tests {
         scanner.feed(b"tail of long line\ndata: {\"usage\":{\"output_tokens\":3}}\n");
         assert_eq!(scanner.usage().output_tokens, Some(3));
     }
+
+    // Ported from main's SseUsageExtractor tests (v1.1.0): same relay guarantees.
+    fn scan(provider: Provider, chunks: &[&[u8]]) -> TokenUsage {
+        let mut scanner = SseUsageScanner::new(provider);
+        for chunk in chunks {
+            scanner.feed(chunk);
+        }
+        scanner.usage().clone()
+    }
+
+    #[test]
+    fn collects_openai_responses_usage_across_split_chunks() {
+        let usage = scan(
+            Provider::OpenAI,
+            &[
+                b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":120,\"output_tokens\":",
+                b"45,\"input_tokens_details\":{\"cached_tokens\":30},\"output_tokens_details\":{\"reasoning_tokens\":11}}}}\n\n",
+            ],
+        );
+        assert_eq!(
+            usage,
+            TokenUsage {
+                input_tokens: Some(120),
+                output_tokens: Some(45),
+                cached_tokens: Some(30),
+                reasoning_tokens: Some(11),
+            }
+        );
+    }
+
+    #[test]
+    fn merges_anthropic_start_and_delta_usage_with_crlf() {
+        let usage = scan(
+            Provider::Anthropic,
+            &[
+                b"event: message_start\r\ndata: {\"usage\":{\"input_tokens\":300,\"cache_read_input_tokens\":40}}\r\n\r\n",
+                b"event: message_delta\ndata: {\"usage\":{\"output_tokens\":25,\"thinking_tokens\":8}}\n\n",
+            ],
+        );
+        assert_eq!(
+            usage,
+            TokenUsage {
+                input_tokens: Some(300),
+                output_tokens: Some(25),
+                cached_tokens: Some(40),
+                reasoning_tokens: Some(8),
+            }
+        );
+    }
+
+    #[test]
+    fn ignores_invalid_events_and_done_markers() {
+        let usage = scan(Provider::OpenAI, &[b"data: not-json\n\ndata: [DONE]\n\n"]);
+        assert_eq!(usage, TokenUsage::default());
+    }
 }

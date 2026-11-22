@@ -828,7 +828,9 @@ async fn test_response_side_stream_detection_bypasses_cache() {
                 Response::builder()
                     .status(200)
                     .header("content-type", "text/event-stream; charset=utf-8")
-                    .body(Body::from("data: {\"type\": \"ping\"}\n\n"))
+                    .body(Body::from(
+                        "event: message_start\ndata: {\"usage\":{\"input_tokens\":7,\"cache_read_input_tokens\":1}}\n\nevent: message_delta\ndata: {\"usage\":{\"output_tokens\":2}}\n\n",
+                    ))
                     .unwrap()
             }
         }),
@@ -870,7 +872,25 @@ async fn test_response_side_stream_detection_bypasses_cache() {
         .to_str()
         .unwrap();
     assert!(ct.contains("text/event-stream"));
+    let streamed_bytes = resp1.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        streamed_bytes.as_ref(),
+        b"event: message_start\ndata: {\"usage\":{\"input_tokens\":7,\"cache_read_input_tokens\":1}}\n\nevent: message_delta\ndata: {\"usage\":{\"output_tokens\":2}}\n\n",
+        "the telemetry tee must relay the upstream stream byte-for-byte"
+    );
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
+
+    let stats_req = Request::builder()
+        .uri("/_retoken/stats")
+        .body(Body::empty())
+        .unwrap();
+    let stats = app.clone().oneshot(stats_req).await.unwrap();
+    let stats_bytes = stats.into_body().collect().await.unwrap().to_bytes();
+    let stats: serde_json::Value = serde_json::from_slice(&stats_bytes).unwrap();
+    assert_eq!(stats["total_requests"], 1);
+    assert_eq!(stats["total_input_tokens"], 7);
+    assert_eq!(stats["total_output_tokens"], 2);
+    assert_eq!(stats["total_cached_tokens"], 1);
 
     // Request 2: identical request must NOT hit cache because response was an event stream
     let req2 = Request::builder()
@@ -888,6 +908,73 @@ async fn test_response_side_stream_detection_bypasses_cache() {
         2,
         "SSE responses must never be cached even if client did not explicitly set stream: true"
     );
+}
+
+#[tokio::test]
+async fn test_openai_responses_reuses_only_exact_duplicate_tool_output_when_enabled() {
+    let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let captured_request = captured.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let upstream = Router::new().route(
+        "/v1/responses",
+        post(move |req: Request<Body>| {
+            let captured = captured_request.clone();
+            async move {
+                *captured.lock().await = axum::body::to_bytes(req.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec();
+                Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"id":"resp_test","usage":{"input_tokens":1,"output_tokens":1}}"#,
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let ccr_store = Arc::new(CcrStore::open_in_memory().unwrap());
+    let config = AppConfig {
+        openai_base_url: format!("http://{}", addr),
+        allow_private_upstreams: true,
+        block_reuse_enabled: true,
+        ..Default::default()
+    };
+    let app = gateway::app(config, ccr_store).unwrap();
+
+    let output = "exact successful command output\n".repeat(120);
+    let request = serde_json::json!({
+        "model": "gpt-5-codex",
+        "input": [
+            {"type": "function_call_output", "call_id": "first", "output": output},
+            {"type": "function_call_output", "call_id": "second", "output": "exact successful command output\n".repeat(120)}
+        ]
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/responses")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&request).unwrap()))
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), 200);
+
+    let forwarded: serde_json::Value = serde_json::from_slice(&captured.lock().await).unwrap();
+    assert_eq!(forwarded["input"][0]["output"], output);
+    assert!(forwarded["input"][1]["output"]
+        .as_str()
+        .unwrap()
+        .contains("complete identical bytes appear earlier"));
+    assert!(forwarded.get("instructions").is_none());
+    assert!(forwarded.get("tools").is_none());
 }
 
 #[test]

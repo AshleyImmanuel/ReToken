@@ -1,0 +1,14 @@
+## What's Changed in v1.1.0
+
+### New Features & Optimizations
+- **Stdio MCP Server (`retoken-mcp`)**: Native Model Context Protocol (MCP) server for Antigravity, Claude, and Codex with tools for `retoken_status`, `retoken_doctor`, `retoken_report`, and `retoken_cache_clear`.
+- **Exact Duplicate Block Reuse**: Eliminates duplicate tool outputs across multi-turn sessions at the wire level, preventing repeated token billing on unchanged command outputs.
+- **Provider Prefix Alignment**: Deterministic tool sorting and system prompt canonicalization for OpenAI/Codex (50% discount) and ephemeral cache breakpoint injection for Anthropic (90% discount).
+- **Ultra-Savings Preset**: Tuned heuristic log slicing, homogeneous JSON array collapsing, and Context Collapse & Retrieval (CCR) for up to 80-90% API bill reduction.
+- **Dedicated CLI Wrappers**: Scoped process wrappers for Codex (`retoken-codex.ps1`) and Claude Code (`retoken-claude.ps1`).
+
+### Prebuilt Binaries Included
+- `retoken-v1.1.0-windows-x86_64.zip` (Includes both standalone CLI and MCP server)
+- `retoken.exe`
+- `retoken-mcp.exe`
+

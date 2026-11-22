@@ -4,7 +4,7 @@ use retoken_core::cache::ResponseCache;
 use retoken_core::recorder::{FlightRecord, FlightTelemetry};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::cache::build_cache_miss_response;
 use super::upstream;
@@ -31,6 +31,12 @@ impl Drop for StreamTelemetryGuard {
         if self.failed {
             rec.errors = 1;
         }
+        // Record synchronously when uncontended, so stats read right after a stream ends
+        // include it; defer to the runtime only if another request holds the lock.
+        if let Ok(mut tel) = self.telemetry.try_lock() {
+            tel.record(&rec);
+            return;
+        }
         let telemetry = self.telemetry.clone();
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
@@ -38,11 +44,7 @@ impl Drop for StreamTelemetryGuard {
                     telemetry.lock().await.record(&rec);
                 });
             }
-            Err(_) => {
-                if let Ok(mut tel) = telemetry.try_lock() {
-                    tel.record(&rec);
-                }
-            }
+            Err(_) => warn!("stream telemetry dropped: telemetry lock busy and no runtime"),
         }
     }
 }

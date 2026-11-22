@@ -339,7 +339,8 @@ pub fn forwardable_request_headers(headers: &HeaderMap) -> HeaderMap {
 ///   2. Credentials of a provider ReToken cannot route (Gemini `x-goog-api-key`, `?key=`)
 ///      -> rejected, so they are never forwarded to another provider
 ///   3. If path contains `/v1/messages` or starts with `/messages` -> Anthropic (Claude API)
-///   4. If path contains `/v1/chat/completions` or starts with `/chat/completions` -> OpenAI
+///   4. If path targets OpenAI Chat Completions or Responses (`/v1/chat/completions`,
+///      `/v1/responses`, with or without `/v1`) -> OpenAI
 ///   5. Anthropic headers (`x-api-key`, `anthropic-version`, `anthropic-beta`) -> Anthropic.
 ///      Checked before `Bearer` because Anthropic OAuth clients (Claude Code subscriptions)
 ///      also send `Authorization: Bearer`.
@@ -392,8 +393,10 @@ pub fn detect_provider(
     }
     if path.contains("/v1/chat/completions")
         || path.contains("/v1/completions")
+        || path.contains("/v1/responses")
         || path.starts_with("/chat/completions")
         || path.starts_with("/completions")
+        || path.starts_with("/responses")
     {
         return Ok(Provider::OpenAI);
     }
@@ -439,6 +442,7 @@ pub fn build_target_url(
         Provider::OpenAI => {
             if normalized_path.starts_with("/chat/completions")
                 || normalized_path.starts_with("/completions")
+                || normalized_path.starts_with("/responses")
                 || normalized_path.starts_with("/models")
             {
                 normalized_path = format!("/v1{}", normalized_path);
@@ -514,20 +518,32 @@ pub fn usage_from_object(provider: &Provider, usage_obj: &serde_json::Value) -> 
         Provider::OpenAI => {
             usage.input_tokens = usage_obj
                 .get("prompt_tokens")
+                .or_else(|| usage_obj.get("input_tokens"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             usage.output_tokens = usage_obj
                 .get("completion_tokens")
+                .or_else(|| usage_obj.get("output_tokens"))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             usage.cached_tokens = usage_obj
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
+                .or_else(|| {
+                    usage_obj
+                        .get("input_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                })
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             usage.reasoning_tokens = usage_obj
                 .get("completion_tokens_details")
                 .and_then(|d| d.get("reasoning_tokens"))
+                .or_else(|| {
+                    usage_obj
+                        .get("output_tokens_details")
+                        .and_then(|d| d.get("reasoning_tokens"))
+                })
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
         }
@@ -663,6 +679,10 @@ mod tests {
 
         // OpenAI path
         let p = detect_provider("/v1/chat/completions", &empty_headers, false, &[]).unwrap();
+        assert_eq!(p, Provider::OpenAI);
+
+        // OpenAI Responses path (used by current Codex integrations)
+        let p = detect_provider("/v1/responses", &empty_headers, false, &[]).unwrap();
         assert_eq!(p, Provider::OpenAI);
 
         // Anthropic header
@@ -817,6 +837,25 @@ mod tests {
                 "completion_tokens_details": {
                     "reasoning_tokens": 600
                 }
+            }
+        });
+        let body = serde_json::to_vec(&response).unwrap();
+        let usage = extract_token_usage(&Provider::OpenAI, &body);
+        assert_eq!(usage.input_tokens, Some(1500));
+        assert_eq!(usage.output_tokens, Some(800));
+        assert_eq!(usage.cached_tokens, Some(1024));
+        assert_eq!(usage.reasoning_tokens, Some(600));
+    }
+
+    #[test]
+    fn test_extract_token_usage_openai_responses_tokens() {
+        let response = serde_json::json!({
+            "id": "resp_123",
+            "usage": {
+                "input_tokens": 1500,
+                "output_tokens": 800,
+                "input_tokens_details": { "cached_tokens": 1024 },
+                "output_tokens_details": { "reasoning_tokens": 600 }
             }
         });
         let body = serde_json::to_vec(&response).unwrap();

@@ -47,12 +47,35 @@ pub fn bypasses_cache(path: &str, headers: &[(String, String)], params: &Request
         || params.multiple_completions
 }
 
-/// Returns true if the request path targets an LLM completion/generation endpoint.
+/// The request path without its query string or trailing slash, lowercased.
+fn endpoint(path: &str) -> String {
+    path.split('?')
+        .next()
+        .unwrap_or(path)
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+/// Returns true if the request path targets an LLM completion/generation endpoint
+/// (Anthropic Messages, OpenAI Chat Completions, legacy Completions, OpenAI Responses).
+/// Matched by suffix so prefixed base URLs (`/w/claude/v1/messages`) still count, while
+/// sub-resources such as `/v1/responses/input_tokens` do not.
 pub fn is_generation_endpoint(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.contains("/messages")
-        || lower.contains("/chat/completions")
-        || lower.contains("/completions")
+    let path = endpoint(path);
+    [
+        "/messages",
+        "/chat/completions",
+        "/completions",
+        "/responses",
+    ]
+    .iter()
+    .any(|suffix| path.ends_with(suffix))
+}
+
+/// Returns true for the OpenAI Responses API, whose structured items are forwarded
+/// byte-for-byte: its upstream prompt caching works without rewriting the body.
+pub fn is_openai_responses_endpoint(path: &str) -> bool {
+    endpoint(path).ends_with("/responses")
 }
 
 #[cfg(test)]
@@ -73,9 +96,21 @@ mod tests {
         assert!(is_generation_endpoint("/v1/chat/completions"));
         assert!(is_generation_endpoint("/chat/completions"));
         assert!(is_generation_endpoint("/v1/completions"));
+        assert!(is_generation_endpoint("/v1/responses"));
+        assert!(is_generation_endpoint("/v1/responses?stream=true"));
+        assert!(is_generation_endpoint("/w/claude/v1/messages/"));
         assert!(!is_generation_endpoint("/v1/models"));
+        assert!(!is_generation_endpoint("/v1/responses/input_tokens"));
         assert!(!is_generation_endpoint("/v1/embeddings"));
         assert!(!is_generation_endpoint("/_retoken/stats"));
+    }
+
+    #[test]
+    fn test_is_openai_responses_endpoint() {
+        assert!(is_openai_responses_endpoint("/v1/responses"));
+        assert!(is_openai_responses_endpoint("/responses?stream=true"));
+        assert!(!is_openai_responses_endpoint("/v1/responses/input_tokens"));
+        assert!(!is_openai_responses_endpoint("/v1/chat/completions"));
     }
 
     #[test]
