@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest a new compression strategy, agent integration or improvement.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Which agent and workload, and where the tokens go today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Could it hide something the model needs?
+      description: How the model would recover anything removed (see CONTRIBUTING.md, "Rules for changes that touch model input").

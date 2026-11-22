@@ -1,0 +1,29 @@
+name: Benchmark result
+description: Share cost, turns and correctness from your own workload, with and without ReToken.
+labels: ["benchmark"]
+body:
+  - type: input
+    id: setup
+    attributes:
+      label: Agent, model and ReToken version
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: Task and method
+      description: What the agent did, how many runs per setup, and how you judged correctness.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Cost, turns, output tokens and correctness for each setup.
+      value: |
+        | Setup | Cost | Turns | Output tokens | Correct |
+        |---|---|---|---|---|
+        | Direct | | | | |
+        | ReToken | | | | |
+    validations:
+      required: true

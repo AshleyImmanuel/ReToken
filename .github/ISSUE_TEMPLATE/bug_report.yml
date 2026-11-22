@@ -1,0 +1,45 @@
+name: Bug report
+description: ReToken broke a request, changed an answer, or did not save tokens as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Remove API keys, tokens and private code from anything you paste.
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and version
+      placeholder: Claude Code 2.1.330, opencode 0.9, Cursor 1.4...
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and model
+      placeholder: Anthropic claude-sonnet, OpenAI gpt-5...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ReToken version or commit
+      placeholder: v1.1.0 or git commit hash
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: Settings (retoken.json / RETOKEN_* env vars), whether `retoken mcp` is registered, and the prompt or task.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Proxy log lines
+      description: The `retoken run` output around the failure, such as `Pipeline:` and `Optimized request:` lines.
+      render: text
