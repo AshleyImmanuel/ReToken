@@ -29,7 +29,7 @@
 >
 > 1. **Default Lossless Operation**: In default configuration (`compression_enabled: true`, `prompt_caching_enabled: true`, `ccr_enabled: false`, `terse_mode: false`), ReToken never changes what the model reads beyond replacing exact repeats of earlier tool output with a reference, and adds cache breakpoints. Set both flags to `false` for a bit-for-bit transparent pass-through.
 > 2. **Stateful Replay in CCR**: The live CCR engine dispatches protocol-compliant `tool_result` turns back to the provider when the model invokes `retoken_retrieve`. However, stateful request replay across a transparent HTTP proxy is an advanced pattern that has not been battle-tested against high-volume production Anthropic traffic under real-world edge cases (e.g. concurrent tool execution, aggressive rate limits, stream conversion).
-> 3. **Non-Trivial Behavior Modifications**: Opting into `compression_enabled`, `ccr_enabled`, or `terse_mode` actively modifies prompt structures, elides repetitive tool outputs, or instructs the model toward extreme brevity. Keep these flags disabled if model answer richness and exact prompt preservation are required.
+> 3. **Non-Trivial Behavior Modifications**: Registering the `retoken mcp` retrieval tool (which enables lossy elision under `compression_enabled`), `ccr_enabled`, or `terse_mode` actively modifies prompt structures, elides repetitive tool outputs, or instructs the model toward extreme brevity. Keep these flags disabled if model answer richness and exact prompt preservation are required.
 
 ---
 
@@ -87,7 +87,9 @@ claude mcp add retoken -- retoken mcp
 "mcp": { "retoken": { "type": "local", "command": ["retoken", "mcp"] } }
 ```
 
-ReToken detects the `*retoken_retrieve` tool in each request. Without it, only lossless compression is applied.
+ReToken detects the `*retoken_retrieve` tool in each request, including when Claude Code defers MCP tools behind `ToolSearch` (`ENABLE_TOOL_SEARCH`). Without it, only lossless compression is applied.
+
+Optional: `RETOKEN_TERSE_MODE=true` (or `"terse_mode": true` in `retoken.json`) asks the model for terse prose replies; code and tool inputs stay normal. All settings and their defaults are listed in [`AI_INSTALL.md`](AI_INSTALL.md#step-4-choose-settings-optional).
 
 ### Auto-Installation via AI
 
@@ -118,7 +120,7 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 | `retoken doctor` | Implemented | Diagnoses local gateway status, loopback latency, config syntax validity, CCR storage, and provider connectivity. |
 | `retoken stats` | Implemented | Displays runtime telemetry tracking token usage, cache hit ratio, token savings, and data transferred. |
 | `retoken cache [status]` | Implemented | Displays cache state, active entries, capacity, and hit ratios. |
-| `retoken cache clear` | Implemented | Purges live in-memory response cache and persistent CCR storage. |
+| `retoken cache clear` | Implemented | Purges the live gateway's in-memory response cache (stored CCR originals live in `<data dir>/ccr`). |
 | `retoken cache invalidate <key>` | Implemented | Invalidates a specific cached response entry by key. |
 | `retoken analyze [path]` | Implemented | Comment-aware symbol scanner and dependency graph resolution (Rust, Python, TS/JS). |
 | `retoken mcp` | Implemented | Serves `retoken_retrieve` over MCP (stdio) so agents can fetch elided originals, optionally filtered by `pattern` or a line range. |
@@ -137,7 +139,7 @@ To configure via an AI agent (Claude Code, Aider, RooCode):
 - **Administrative Endpoints & Telemetry**: The running gateway daemon exposes loopback administrative routes `POST /_retoken/cache/clear`, `GET /_retoken/cache` (active entry listing), `DELETE /_retoken/cache?key=<k>` (single entry invalidation), and `GET /_retoken/stats` (live telemetry).
 - **Cache Opt-Out**: Requests with `Cache-Control: no-cache`, `no-store`, `Pragma: no-cache`, or `x-retoken-cache: false` bypass cache lookup and storage entirely.
 - **Request, Response, and Cache Memory Budgets**: Request body size is capped by `RETOKEN_MAX_REQUEST_BODY_BYTES` (default 10 MB, returning 413 on exceed). Non-streaming response body size is capped by `RETOKEN_MAX_RESPONSE_BODY_BYTES` (default 10 MB, returning 502 on exceed). Total response cache memory is strictly capped by `RETOKEN_MAX_CACHE_BYTES` (default 256 MB) alongside entry capacity (`RETOKEN_MAX_CACHE_ENTRIES`, default 1024), preventing memory leaks.
-- **Prompt & Reasoning Preservation**: User prompts, system messages, assistant history, and code comments are preserved bit-for-bit without elision or comment stripping. Lossy compression (`compression_enabled`) and terse mode (`terse_mode`) are disabled by default. Contextual Compression and Retrieval (CCR) is opt-in (`ccr_enabled`) to ensure model reasoning loops remain unhindered.
+- **Prompt & Reasoning Preservation**: User prompts, system messages, assistant history, and code comments are preserved bit-for-bit without elision or comment stripping. Lossy elision runs only when the agent exposes the `retoken mcp` retrieval tool, and terse mode (`terse_mode`) is disabled by default. Contextual Compression and Retrieval (CCR) is opt-in (`ccr_enabled`) to ensure model reasoning loops remain unhindered.
 - **Upstream Timeouts**: Network requests to upstream providers enforce a strict safety timeout (`upstream_timeout_secs`, default 60s).
 
 ---
