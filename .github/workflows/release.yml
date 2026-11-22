@@ -20,7 +20,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bin_name: retoken
             archive_name: retoken-x86_64-unknown-linux-gnu.tar.gz
-          - os: macos-13
+          # Intel macOS is cross-compiled on Apple Silicon: the macos-13 runner is retired,
+          # and jobs requesting it queue until they time out.
+          - os: macos-latest
             target: x86_64-apple-darwin
             bin_name: retoken
             archive_name: retoken-x86_64-apple-darwin.tar.gz
