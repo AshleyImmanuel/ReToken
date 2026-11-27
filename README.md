@@ -160,7 +160,7 @@ Set `compression_enabled` and `prompt_caching_enabled` to `false` for a byte-for
 | `retoken stats` | Show live token savings, cache hit ratio and data transferred |
 | `retoken cache [status\|clear\|invalidate <key>]` | Inspect or clear the response cache |
 | `retoken analyze [path]` | Symbol scan and dependency graph for Rust, Python and TypeScript/JavaScript |
-| `retoken init` | Write ReToken guidance files (`.claudecode` and `.gemini/config/skills/retoken/SKILL.md`) into the current project |
+| `retoken init` | Add a Claude Code project skill (`.claude/skills/retoken/SKILL.md`) that explains ReToken's retrieval markers |
 
 ## Security and privacy
 

@@ -36,7 +36,8 @@ When invoked as `retoken wrap <command>`, ReToken automatically:
 - If not running, launches the proxy daemon in the background.
 - Injects standard SDK environment variables into the child process:
   - `ANTHROPIC_BASE_URL=http://127.0.0.1:8888/v1`
-  - `OPENAI_BASE_URL=http://127.0.0.1:8888/v1` (plus `OPENAI_API_BASE`, `GEMINI_BASE_URL`, `GROQ_BASE_URL`, `MISTRAL_API_BASE`, `LITELLM_BASE_URL`)
+  - `OPENAI_BASE_URL=http://127.0.0.1:8888/v1` (plus `OPENAI_API_BASE`, `GROQ_BASE_URL`, `MISTRAL_API_BASE`, `LITELLM_BASE_URL`)
+  - Gemini clients are not redirected: the proxy does not support the Gemini API format yet.
   - `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1`, so Claude Code keeps its first-party features (prompt caching, tool search, long context) through a local base URL.
   - Any additional variables passed via `--inject <VAR>`.
 

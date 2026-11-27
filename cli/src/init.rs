@@ -1,70 +1,96 @@
 use std::fs;
 use std::path::Path;
 
-const CLAUDE_CODE_CONTENT: &str = r#"# ReToken Terse Optimization Configuration (Inspired by Caveman)
-# This configures Claude Code to automatically be aware of ReToken.
-
-# ReToken is an intercepting proxy. It will automatically elide large logs and JSON.
-# Elided tool output is marked `[ReToken: ... handle "ccr:..." ...]` and names the retrieval tool to call.
-# DO NOT hallucinate elided data. If you see a [ReToken: ...] marker, call the retrieval tool it names.
-
-# Keep your outputs extremely terse. No conversational filler. Provide only raw code or data.
-
-## Available Tool Commands
-- **`retoken_retrieve(handle)`**: When you see data replaced with a `[ReToken: ... handle "ccr:..." ...]` marker, invoke the `retoken_retrieve` tool with the handle as the argument to fetch the original, uncompressed bytes.
-- **CLI Wrap**: If you need to spawn a sub-agent or script that uses an LLM, prefix it with `retoken wrap -- ` (e.g. `retoken wrap -- aider` or `retoken wrap -- python script.py`). This forces all sub-agent LLM traffic through ReToken.
-- **CLI Analyze**: Run `retoken analyze .` to gather intelligence about a codebase.
-"#;
-
-const ANTIGRAVITY_SKILL_CONTENT: &str = r#"---
+/// Project skill for Claude Code (`.claude/skills/<name>/SKILL.md` is where Claude Code looks
+/// for project skills). It only explains ReToken's markers; it does not change reply style.
+const CLAUDE_SKILL_CONTENT: &str = r#"---
 name: retoken
-description: Instructions for the agent on how to interact with the ReToken proxy.
+description: 'Use when tool output contains a "[ReToken: ... handle "ccr:..." ...]" marker. ReToken shortened that output and the original can be fetched.'
 ---
 
-# ReToken Proxy
+# ReToken
 
-You are currently running behind the ReToken proxy.
+This project's model traffic may go through ReToken, a local proxy that shortens large tool output (build and test logs, JSON arrays, file reads the conversation has moved past) to save tokens.
 
-ReToken is a local-first Agent Runtime Optimizer designed for AI coding agents. It saves tokens by intercepting your requests and eliding large logs, JSON arrays, and file contents with `<<ccr:...>>` handles.
+When tool output contains a marker such as:
 
-## Available Tool Commands
-- **`retoken_retrieve(handle)`**: When you see data replaced with a `[ReToken: ... handle "ccr:..." ...]` marker, invoke the injected `retoken_retrieve` tool with the handle as the argument to fetch the original bytes.
-- **CLI Wrap**: If you need to spawn a sub-agent or run an LLM script, prefix the command with `retoken wrap -- ` (e.g. `retoken wrap -- python main.py`). This transparently routes its traffic through ReToken.
-- **CLI Analyze**: Run `retoken analyze <path>` to gather structural intelligence about a directory.
+    [ReToken: full original elided; call `retoken_retrieve` with handle "ccr:..." to retrieve it]
 
-## Rules
-1. **Never guess elided data**: If you see a handle like `ccr:...` in a ReToken marker and need the original contents, you MUST use the `retoken_retrieve` tool to fetch it.
-2. **Terse Mode (Caveman Inspired)**: ReToken enforces extreme brevity, drawing inspiration from the mature Caveman ecosystem. You must output only raw technical data, code, or direct answers. Omit all pleasantries and explanations.
+- Call the tool the marker names with that handle to get the original. Never guess the elided content.
+- For large originals, pass `pattern` to get only matching lines, or `start_line` and `end_line` to read one part.
+- If the tool is deferred, load it with ToolSearch first.
 "#;
 
 pub fn run_init() -> anyhow::Result<()> {
-    println!("Initializing ReToken Agent configurations in current directory...");
-
-    // Claude Code
-    let claude_path = Path::new(".claudecode");
-    if !claude_path.exists() {
-        fs::write(claude_path, CLAUDE_CODE_CONTENT)?;
-        println!("Created {}", claude_path.display());
-    } else {
-        println!("{} already exists, skipping.", claude_path.display());
+    println!("Initializing ReToken agent guidance in the current directory...");
+    for line in write_guidance(Path::new("."))? {
+        println!("{line}");
     }
-
-    // Antigravity (Gemini)
-    let agy_dir = Path::new(".gemini")
-        .join("config")
-        .join("skills")
-        .join("retoken");
-    if !agy_dir.exists() {
-        fs::create_dir_all(&agy_dir)?;
-    }
-    let agy_path = agy_dir.join("SKILL.md");
-    if !agy_path.exists() {
-        fs::write(&agy_path, ANTIGRAVITY_SKILL_CONTENT)?;
-        println!("Created {}", agy_path.display());
-    } else {
-        println!("{} already exists, skipping.", agy_path.display());
-    }
-
-    println!("\nConfiguration complete! Agents running in this directory will automatically adapt to ReToken.");
+    println!(
+        "\nDone. Claude Code loads project skills from .claude/skills when it starts in this directory."
+    );
     Ok(())
+}
+
+/// Writes the guidance files under `root`, never overwriting existing ones. Returns one status
+/// line per file.
+fn write_guidance(root: &Path) -> anyhow::Result<Vec<String>> {
+    let skill_dir = root.join(".claude").join("skills").join("retoken");
+    let skill_path = skill_dir.join("SKILL.md");
+    if skill_path.exists() {
+        return Ok(vec![format!(
+            "{} already exists, skipping.",
+            skill_path.display()
+        )]);
+    }
+    fs::create_dir_all(&skill_dir)?;
+    fs::write(&skill_path, CLAUDE_SKILL_CONTENT)?;
+    Ok(vec![format!("Created {}", skill_path.display())])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("retoken-init-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn writes_claude_skill_with_frontmatter() {
+        let root = temp_root("write");
+        write_guidance(&root).unwrap();
+        let written = fs::read_to_string(root.join(".claude/skills/retoken/SKILL.md")).unwrap();
+        assert!(written.starts_with("---\nname: retoken\ndescription: "));
+        assert!(written.contains("retoken_retrieve"));
+        assert!(
+            !root.join(".gemini").exists(),
+            "Gemini traffic is not supported, so no Gemini guidance is written"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn never_overwrites_an_existing_skill() {
+        let root = temp_root("keep");
+        let dir = root.join(".claude/skills/retoken");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), "mine").unwrap();
+        let status = write_guidance(&root).unwrap();
+        assert!(status[0].contains("already exists"));
+        assert_eq!(fs::read_to_string(dir.join("SKILL.md")).unwrap(), "mine");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn skill_marker_example_matches_the_real_marker() {
+        let marker = compressors::ccr::ccr_marker("ccr:abc", "retoken_retrieve");
+        let prefix = "[ReToken: full original elided; call `retoken_retrieve` with handle";
+        assert!(marker.starts_with(prefix));
+        assert!(CLAUDE_SKILL_CONTENT.contains(prefix));
+    }
 }

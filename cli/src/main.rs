@@ -26,7 +26,7 @@ pub enum Commands {
         #[arg(short, long, default_value = ".")]
         path: String,
     },
-    /// Initialize agent configurations (.claudecode, SKILL.md) in the current directory
+    /// Add a Claude Code project skill (.claude/skills/retoken/SKILL.md) to the current directory
     Init,
     /// Wrap an agent or CLI tool, automatically routing its LLM traffic through ReToken
     Wrap {
