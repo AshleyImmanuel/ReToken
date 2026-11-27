@@ -1,0 +1,14 @@
+{
+  "id": "multicurrency-report",
+  "suite": "large",
+  "title": "Multi-file feature: converted trial balance",
+  "prompt": "Add exchange-rate directives to the journal format and a trial balance converted to one base currency. This touches ledgerkit/parser.py, ledgerkit/fx.py, ledgerkit/report.py and ledgerkit/__main__.py.\n\n1. Parser: a top-level line `rate <BASE> <QUOTE> <RATE>` (for example `rate EUR USD 1.0850`, meaning 1 EUR buys 1.0850 USD) is a directive like `open`. `parse_journal` must return these in a new `ParsedJournal.rates` attribute: a list of `(base, quote, Decimal)` tuples in file order, with currency codes upper-cased. A malformed rate line (wrong number of fields, a rate that is not a positive number, or an unknown currency) raises `ParseError` carrying that line's number. `load_ledger` must accept journals that contain rate lines.\n2. fx: add a classmethod `RateTable.from_directives(rates)` that builds a table from such tuples; a later directive for the same pair replaces an earlier one.\n3. report: extend `trial_balance(ledger, as_of=None, base_currency=None, rates=None)`. Without `base_currency` the behaviour is unchanged. With `base_currency`, convert each of an account's per-currency balances with `rates.convert(...)` (which rounds half-even to the base currency's minor unit), add them up, and return one row per account in the base currency, skipping accounts whose converted total is zero. Raise `ledgerkit.fx.MissingRate` when a needed rate is missing, and `ValueError` when `base_currency` is given without `rates`.\n4. CLI: `python -m ledgerkit tb <journal> --base USD` prints the converted trial balance using the rate directives found in that journal.\n\nKeep every existing test passing (run `python -m unittest discover -s tests -t .`, or `python3`) and add tests for the new behaviour.",
+  "max_turns": 50,
+  "est_cost_usd": 0.45,
+  "check": {
+    "type": "tests",
+    "restore": ["tests"],
+    "hidden": "hidden",
+    "command": ["{python}", "-m", "unittest", "discover", "-s", "tests", "-t", "."]
+  }
+}

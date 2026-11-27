@@ -1,0 +1,71 @@
+; Example household books for ledgerkit.
+; Run: python -m ledgerkit tb examples/household.journal
+
+open 2026-01-01 assets:checking asset
+open 2026-01-01 assets:savings asset
+open 2026-01-01 assets:eur-wallet asset
+open 2026-01-01 liabilities:visa liability
+open 2026-01-01 equity:opening equity
+open 2026-01-01 income:salary income
+open 2026-01-01 income:interest income
+open 2026-01-01 expenses:rent expense
+open 2026-01-01 expenses:food expense
+open 2026-01-01 expenses:travel expense
+open 2026-01-01 expenses:utilities expense
+
+2026-01-01 Opening balances
+  assets:checking      2,450.00 USD
+  assets:savings      10,000.00 USD
+  equity:opening
+
+2026-01-01 Opening euro cash
+  assets:eur-wallet      180.00 EUR
+  equity:opening        -180.00 EUR
+
+2026-01-02 Rent #housing
+  expenses:rent        1,650.00 USD
+  assets:checking
+
+2026-01-05 Salary #payroll
+  assets:checking      4,210.55 USD
+  income:salary
+
+2026-01-09 Groceries #food
+  expenses:food          143.27 USD
+  liabilities:visa
+
+2026-01-14 Electricity and water #utilities
+  expenses:utilities      96.40 USD
+  assets:checking
+
+2026-01-20 Lisbon trip, train tickets #travel
+  expenses:travel         64.00 EUR
+  assets:eur-wallet
+
+2026-01-21 Lisbon trip, dinner #travel #food
+  expenses:food           38.50 EUR
+  assets:eur-wallet
+
+2026-01-28 Card payment
+  liabilities:visa       143.27 USD
+  assets:checking
+
+2026-01-31 Savings interest
+  assets:savings          12.31 USD
+  income:interest
+
+2026-02-02 Rent #housing
+  expenses:rent        1,650.00 USD
+  assets:checking
+
+2026-02-05 Salary #payroll
+  assets:checking      4,210.55 USD
+  income:salary
+
+2026-02-11 Groceries #food
+  expenses:food          131.90 USD
+  liabilities:visa
+
+2026-02-14 Transfer to savings
+  assets:savings       1,000.00 USD
+  assets:checking

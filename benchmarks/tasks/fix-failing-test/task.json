@@ -1,0 +1,14 @@
+{
+  "id": "fix-failing-test",
+  "suite": "core",
+  "title": "Fix a failing test",
+  "prompt": "One test in this repository is failing. Run the test suite with `python -m unittest discover -s tests -t .` (use `python3` if `python` is not found), find the bug in the library code and fix it. Do not edit anything under tests/. Confirm the whole suite passes when you are done.",
+  "overlay": "overlay",
+  "max_turns": 25,
+  "est_cost_usd": 0.05,
+  "check": {
+    "type": "tests",
+    "restore": ["tests"],
+    "command": ["{python}", "-m", "unittest", "discover", "-s", "tests", "-t", "."]
+  }
+}

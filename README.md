@@ -36,7 +36,7 @@ ReToken saved 29% against calling the API directly in a headless Claude Code ben
 | ReToken | $0.0329 | 4.33 | 12.8 | 826 |
 | **ReToken + terse mode** | **$0.0302** | **3.78** | **11.4** | **719** |
 
-On a single larger multi-file task, ReToken + terse cost $0.264 against $0.452 direct (42% lower). Savings grow with session length and tool-output size; these are small samples, so treat them as indicative.
+On a single larger multi-file task, ReToken + terse cost $0.264 against $0.452 direct (42% lower). Savings grow with session length and tool-output size; these are small samples, so treat them as indicative. To re-run the benchmark yourself, see [`benchmarks/`](benchmarks/README.md).
 
 ## How ReToken Works
 

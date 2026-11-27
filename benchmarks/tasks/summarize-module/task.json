@@ -1,0 +1,22 @@
+{
+  "id": "summarize-module",
+  "suite": "core",
+  "title": "Summarize a module",
+  "prompt": "Summarize ledgerkit/ledger.py for a new contributor: list its public classes and the main methods of `Ledger`, and state every rule that `Ledger.post` enforces before it records a transaction. Keep it under 250 words. Do not modify any files.",
+  "max_turns": 15,
+  "est_cost_usd": 0.04,
+  "check": {
+    "type": "answer",
+    "forbid_changes": true,
+    "patterns": [
+      "open_account",
+      "\\bpost\\b",
+      "balance",
+      "two postings|2 postings|at least two",
+      "zero",
+      "each currency|per currency|every currency|per-currency",
+      "open on|not open|closed",
+      "UnbalancedTransaction"
+    ]
+  }
+}

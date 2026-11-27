@@ -1,0 +1,20 @@
+{
+  "id": "explain-code",
+  "suite": "core",
+  "title": "Explain code",
+  "prompt": "Explain how `Money.allocate` in ledgerkit/money.py splits an amount into parts, and exactly what happens to the minor units (cents) that are left over after rounding, including for negative amounts and zero ratios. Answer in at most 200 words. Do not modify any files.",
+  "max_turns": 15,
+  "est_cost_usd": 0.04,
+  "check": {
+    "type": "answer",
+    "forbid_changes": true,
+    "patterns": [
+      "remainder|left ?over|leftover|extra",
+      "first|earliest|in order",
+      "minor unit|cent",
+      "floor|round(ed|s|ing)? down|integer division|//",
+      "sign|negative",
+      "zero"
+    ]
+  }
+}
