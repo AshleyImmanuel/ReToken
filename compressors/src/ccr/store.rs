@@ -12,6 +12,10 @@ use crate::ccr::paths::dirs_or_default;
 /// Handle prefix for content-addressed CCR entries.
 const HANDLE_PREFIX: &str = "ccr:";
 
+/// Originals not stored or re-stored for this long are removed by [`CcrStore::gc`]. Every
+/// compression re-stores (and so refreshes) the originals a live conversation still references.
+pub const MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
 /// The ReToken Cache & Recovery (CCR) store.
 ///
 /// Content-addressed: every original is stored under `ccr:<sha256 hex>` before the elided

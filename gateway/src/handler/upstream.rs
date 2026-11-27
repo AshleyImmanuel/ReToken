@@ -35,10 +35,13 @@ pub async fn send(
 
     client.execute(request).await.map_err(|e| {
         if is_ssrf_block(&e) {
-            warn!("Outbound destination blocked by SSRF policy: {}", e);
+            warn!(
+                "Outbound destination blocked by SSRF policy: {}",
+                e.without_url()
+            );
             StatusCode::FORBIDDEN
         } else {
-            warn!("Provider request failed: {}", e);
+            warn!("Provider request failed: {}", e.without_url());
             StatusCode::BAD_GATEWAY
         }
     })

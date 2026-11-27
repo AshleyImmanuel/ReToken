@@ -32,7 +32,8 @@ use crate::block_reuse;
 use crate::bypass::forward_raw;
 use crate::optimizer;
 use crate::provider::{
-    build_target_url, detect_provider, forwardable_request_headers, Provider, WireFormat,
+    build_target_url, detect_provider, forwardable_request_headers, is_gemini_stream_path,
+    redact_url_secrets, Provider, WireFormat,
 };
 
 use self::cache::build_cache_hit_response;
@@ -60,7 +61,11 @@ pub async fn handler(
         info!("Bypass mode: forwarding raw request");
         return forward_raw(&state.client, method, path_and_query, req, &state.config).await;
     }
-    info!("Intercepted: {} {}", method, path_and_query);
+    info!(
+        "Intercepted: {} {}",
+        method,
+        redact_url_secrets(path_and_query)
+    );
 
     let (parts, body) = req.into_parts();
     let req_headers = request::header_pairs(&parts.headers);
@@ -82,7 +87,11 @@ pub async fn handler(
         warn!("Failed to build target URL: {}", err);
         StatusCode::BAD_REQUEST
     })?;
-    info!("Provider: {} -> {}", provider.name(), target_url);
+    info!(
+        "Provider: {} -> {}",
+        provider.name(),
+        redact_url_secrets(&target_url)
+    );
     request::log_headers(&parts.headers);
 
     let mut record = FlightRecord {
@@ -95,7 +104,9 @@ pub async fn handler(
     let bytes = request::read_body(body, state.config.max_request_body_bytes).await?;
     record.request_size = bytes.len();
     let mut json_body = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-    let params = RequestParams::from_json(json_body.as_ref());
+    let mut params = RequestParams::from_json(json_body.as_ref());
+    // Gemini streams by endpoint (`:streamGenerateContent`), not by a body flag.
+    params.stream |= is_gemini_stream_path(path_and_query);
     if let Some(model) = &params.model {
         record.model = model.clone();
     }

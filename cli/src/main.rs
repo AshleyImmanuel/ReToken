@@ -4,6 +4,7 @@ use retoken_core::telemetry;
 pub mod analyze;
 pub mod cache_cmd;
 pub mod doctor;
+pub mod exec;
 pub mod init;
 pub mod mcp;
 pub mod stats;
@@ -26,8 +27,21 @@ pub enum Commands {
         #[arg(short, long, default_value = ".")]
         path: String,
     },
-    /// Add a Claude Code project skill (.claude/skills/retoken/SKILL.md) to the current directory
-    Init,
+    /// Add agent guidance to the current directory: a Claude Code project skill
+    /// (.claude/skills/retoken/SKILL.md), plus an Antigravity rule with --antigravity
+    Init {
+        /// Also write .agents/rules/retoken.md, telling Antigravity agents to run noisy
+        /// commands through `retoken exec`
+        #[arg(long)]
+        antigravity: bool,
+    },
+    /// Run a command and print its output with noise removed (errors and summaries kept).
+    /// For agents whose traffic cannot go through the proxy, such as the Antigravity app
+    Exec {
+        /// The command to run (e.g. `retoken exec -- cargo test`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
     /// Wrap an agent or CLI tool, automatically routing its LLM traffic through ReToken
     Wrap {
         /// Optional extra environment variables to override with the proxy URL (e.g. OLLAMA_API_BASE)
@@ -69,8 +83,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Commands::Run);
 
-    // MCP speaks JSON-RPC on stdout; log output there would corrupt the protocol.
-    if command != Commands::Mcp {
+    // MCP speaks JSON-RPC on stdout, and exec's stdout is the command's output: log lines
+    // there would corrupt both.
+    if !matches!(command, Commands::Mcp | Commands::Exec { .. }) {
         telemetry::init_tracing();
     }
 
@@ -83,8 +98,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Analyze { path } => {
             analyze::run_analyze(path)?;
         }
-        Commands::Init => {
-            init::run_init()?;
+        Commands::Init { antigravity } => {
+            init::run_init(antigravity)?;
+        }
+        Commands::Exec { command } => {
+            let code = exec::run_exec(command)?;
+            std::process::exit(code);
         }
         Commands::Wrap { inject, command } => {
             wrap::run_wrap(inject, command).await?;

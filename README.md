@@ -24,8 +24,9 @@ A local Rust proxy that sits between your coding agent and the model provider. I
 
 Coding agents re-send the whole conversation on every turn: build logs, test output, JSON responses and file reads. That repeated input is most of an agent's API bill. ReToken removes the noise from it on the wire, so the same agent finishes the same task for less, with no change to the agent.
 
-- **Built for coding agents.** Used day to day with Claude Code. It forwards both API keys and Claude Code subscription (OAuth) logins unchanged. Any client that lets you set an Anthropic or OpenAI base URL can point at it.
-- **Speaks both wire formats.** Anthropic Messages, OpenAI Chat Completions and OpenAI Responses.
+- **Built for coding agents.** Used day to day with Claude Code. It forwards both API keys and Claude Code subscription (OAuth) logins unchanged. Any client that lets you set an Anthropic, OpenAI or Gemini base URL can point at it.
+- **Speaks three wire formats.** Anthropic Messages, OpenAI Chat Completions and Responses, and the Gemini API (`generateContent`) used by Gemini 4 Hydrogen, Neon and other Gemini models.
+- **Helps where a proxy can't reach.** `retoken exec` shortens command output before an agent sees it, for apps like Google Antigravity whose model traffic cannot be redirected.
 - **Stays on your machine.** Listens on `127.0.0.1` only and forwards each request to the provider your agent already uses, with the agent's own credentials.
 - **Every lossy change can be undone.** The model can fetch the original of anything ReToken shortened through the `retoken_retrieve` MCP tool.
 
@@ -89,6 +90,38 @@ IDE setups are not covered by the test suite. Some IDEs send custom-base-URL req
 </details>
 
 <details>
+<summary><b>Gemini CLI and Antigravity CLI (Gemini API key)</b></summary>
+
+These clients must use a Gemini API key (`GEMINI_API_KEY`). Google sign-in traffic is a different API, which ReToken rejects. Register the retrieval server in the client's MCP settings (`~/.gemini/config/mcp_config.json` for the Antigravity CLI):
+
+```json
+{ "mcpServers": { "retoken": { "command": "retoken", "args": ["mcp"] } } }
+```
+
+Then run the client through the proxy. With `GEMINI_API_KEY` set, `wrap` points `GOOGLE_GEMINI_BASE_URL` at `http://127.0.0.1:8888` (no `/v1`):
+
+```bash
+retoken wrap agy
+```
+
+The Antigravity CLI also needs `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json` to use an API key. Gemini support is tested against a mock Gemini server, not yet against the live API.
+
+</details>
+
+<details>
+<summary><b>Google Antigravity app</b></summary>
+
+The app's model traffic goes through Google's own service and cannot be redirected, so the proxy cannot help there. `retoken exec` and a workspace rule keep noisy command output out of the conversation instead:
+
+```bash
+retoken init --antigravity
+```
+
+See [`docs/antigravity.md`](docs/antigravity.md) for the MCP setup and what `retoken exec` keeps.
+
+</details>
+
+<details>
 <summary><b>Aider and other CLI agents</b></summary>
 
 ```bash
@@ -113,7 +146,7 @@ Prefer to let an agent set it up? Ask it: *"Read AI_INSTALL.md in https://github
 ```mermaid
 flowchart LR
     A["Coding agent<br/>(Claude Code, Cursor, ...)"] -->|request| R["ReToken<br/>127.0.0.1:8888"]
-    R -->|"trimmed request<br/>+ cache breakpoints"| P["Model provider<br/>(Anthropic, OpenAI, ...)"]
+    R -->|"trimmed request<br/>+ cache breakpoints"| P["Model provider<br/>(Anthropic, OpenAI, Gemini)"]
     P -->|response| R
     R -->|response| A
     R -.->|"originals"| S[("Local store<br/>&lt;data dir&gt;/ccr")]
@@ -124,7 +157,7 @@ flowchart LR
 1. **The model always sees what it is reading.** A file read reaches the model in full on the turn it is read. Only after the model has moved on does a large file shrink to an outline (signatures, types, exact line numbers) with a handle to the original.
 2. **Noise goes, failures stay.** Large build, test and log output is shortened, but errors, assertion details and test summaries are always kept. Large uniform JSON arrays keep their first and last items, any error items and statistical outliers. Exact repeats of earlier tool output become a reference to the first copy.
 3. **Lossy only when reversible.** Lossy changes are applied only when the agent exposes the `retoken_retrieve` tool. Without it, ReToken makes lossless changes only. User prompts, system instructions, assistant history, tool definitions and code comments are never altered.
-4. **Prompt caches stay warm.** Each tool result changes at most once, so history stays byte-stable. ReToken places Anthropic cache breakpoints (following the client's TTL, including a rolling breakpoint on the conversation tail) and orders OpenAI tools deterministically, so repeated history is billed at the cached rate.
+4. **Prompt caches stay warm.** Each tool result changes at most once, so history stays byte-stable. ReToken places Anthropic cache breakpoints (following the client's TTL, including a rolling breakpoint on the conversation tail) and orders OpenAI tools deterministically, so repeated history is billed at the cached rate. For Gemini, ReToken adds no cache markers; Gemini's own implicit prefix caching, where the model supports it, benefits from the same byte-stable history.
 5. **Optional terse mode.** Asks the model for short prose replies while keeping code, commands and tool inputs unchanged.
 
 ## Configuration
@@ -146,6 +179,7 @@ ReToken reads `retoken.json`, `.retoken.json` or `.retoken/config.json` from the
 | `port` | `RETOKEN_PORT` | `8888` | Loopback port to listen on |
 | `upstream_timeout_secs` | `RETOKEN_UPSTREAM_TIMEOUT_SECS` | `60` | Connect and idle-read timeout to the provider |
 | `allowed_upstream_hosts` | `RETOKEN_ALLOWED_UPSTREAM_HOSTS` | any public host | Allowlist for custom upstreams |
+| `gemini_base_url` | `RETOKEN_GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | Upstream for Gemini API requests |
 
 Set `compression_enabled` and `prompt_caching_enabled` to `false` for a byte-for-byte pass-through. The full list, including memory limits, is in [`AI_INSTALL.md`](AI_INSTALL.md#step-4-choose-settings-optional).
 
@@ -155,12 +189,13 @@ Set `compression_enabled` and `prompt_caching_enabled` to `false` for a byte-for
 | :--- | :--- |
 | `retoken run` | Start the proxy on `127.0.0.1:8888` (the default when no command is given) |
 | `retoken wrap <cmd>` | Run an agent through the proxy, starting it if needed |
+| `retoken exec -- <cmd>` | Run a command and print its output with noise removed (errors and summaries kept, exit code preserved) |
 | `retoken mcp` | Serve the `retoken_retrieve` tool over MCP (stdio) |
 | `retoken doctor` | Diagnose proxy status, latency, config, storage and connectivity |
 | `retoken stats` | Show live token savings, cache hit ratio and data transferred |
 | `retoken cache [status\|clear\|invalidate <key>]` | Inspect or clear the response cache |
 | `retoken analyze [path]` | Symbol scan and dependency graph for Rust, Python and TypeScript/JavaScript |
-| `retoken init` | Add a Claude Code project skill (`.claude/skills/retoken/SKILL.md`) that explains ReToken's retrieval markers |
+| `retoken init [--antigravity]` | Add a Claude Code project skill (`.claude/skills/retoken/SKILL.md`); with `--antigravity`, also an Antigravity rule (`.agents/rules/retoken.md`) |
 
 ## Security and privacy
 
@@ -168,6 +203,7 @@ Set `compression_enabled` and `prompt_caching_enabled` to `false` for a byte-for
 - **SSRF protection for custom upstreams.** Loopback, private, link-local, carrier-grade NAT, reserved and cloud-metadata ranges are blocked unless you opt in, and the verified address is pinned at connect time to close the DNS-rebinding window.
 - **Credential-aware caching.** Cache keys include a SHA-256 fingerprint of the credentials and client headers, so one key's responses are never served to another. Requests that sample (temperature omitted or above zero without a seed, or `n > 1`) are not cached unless you send `x-retoken-cache-stochastic: true`.
 - **Bounded memory.** Request and buffered response bodies are capped at 10 MB, and the response cache at 1,024 entries and 256 MB by default.
+- **Keys stay out of logs.** Gemini API keys sent as a `?key=` URL parameter are redacted from log lines and error messages.
 - **Local retention.** Originals of shortened output are stored under `<data dir>/ccr` and deleted after 7 days unused.
 
 To report a vulnerability, see [`SECURITY.md`](SECURITY.md).

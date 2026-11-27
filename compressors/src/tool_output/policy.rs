@@ -82,6 +82,31 @@ pub fn log_line_threshold() -> usize {
         .unwrap_or(15)
 }
 
+/// Shortens one command's output the way the proxy shortens command output in a conversation,
+/// for callers outside the proxy (`retoken exec`). Uses the same size and line thresholds and
+/// the same minimum savings. The original is stored first; `None` means print `text` as is
+/// (too small, not worth eliding, or the store failed).
+pub fn shorten_command_output(text: &str, store: &CcrStore, retrieve_tool: &str) -> Option<String> {
+    if text.len() < ccr_size_threshold() || text.lines().count() < log_line_threshold() {
+        return None;
+    }
+    let compressed = compress_logs(text);
+    if !saves_enough(&compressed, text) {
+        return None;
+    }
+    match store.store(text.as_bytes(), "tool_output") {
+        Ok(handle) => Some(format!(
+            "{}\n{}",
+            compressed,
+            ccr_marker(&handle, retrieve_tool)
+        )),
+        Err(e) => {
+            warn!("CCR store failed, keeping output verbatim: {}", e);
+            None
+        }
+    }
+}
+
 /// The first occurrence of a tool output in the conversation.
 struct FirstCopy {
     /// Description of the call that produced it, e.g. `Read(src/lib.rs)`.

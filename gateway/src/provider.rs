@@ -8,7 +8,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 pub enum Provider {
     Anthropic,
     OpenAI,
-    Generic { name: String, base_url: String },
+    /// Google Gemini API (`generativelanguage.googleapis.com`).
+    Gemini,
+    Generic {
+        name: String,
+        base_url: String,
+    },
 }
 
 impl Provider {
@@ -17,6 +22,7 @@ impl Provider {
         match self {
             Provider::Anthropic => &config.anthropic_base_url,
             Provider::OpenAI => &config.openai_base_url,
+            Provider::Gemini => &config.gemini_base_url,
             Provider::Generic { base_url, .. } => base_url.as_str(),
         }
     }
@@ -25,6 +31,7 @@ impl Provider {
         match self {
             Provider::Anthropic => "anthropic",
             Provider::OpenAI => "openai",
+            Provider::Gemini => "gemini",
             Provider::Generic { name, .. } => name.as_str(),
         }
     }
@@ -38,19 +45,64 @@ pub enum WireFormat {
     Anthropic,
     /// OpenAI Chat Completions and compatible APIs: `system` role messages, `tool_calls`.
     OpenAI,
+    /// Gemini `generateContent`: `contents` with `functionCall`/`functionResponse` parts.
+    Gemini,
 }
 
 impl WireFormat {
-    /// Anthropic for the Anthropic provider and for any `/messages` endpoint; OpenAI otherwise.
+    /// Anthropic for the Anthropic provider and for any `/messages` endpoint; Gemini for
+    /// `generateContent` endpoints (except Gemini's OpenAI-compatible `/openai/` routes);
+    /// OpenAI otherwise.
     pub fn detect(provider: &Provider, path: &str) -> Self {
         let path = path.split('?').next().unwrap_or(path);
         match provider {
             Provider::Anthropic => WireFormat::Anthropic,
             Provider::OpenAI => WireFormat::OpenAI,
+            Provider::Gemini if path.contains("/openai/") => WireFormat::OpenAI,
+            Provider::Gemini => WireFormat::Gemini,
+            Provider::Generic { .. } if is_gemini_generation_path(path) => WireFormat::Gemini,
             Provider::Generic { .. } if path.contains("/messages") => WireFormat::Anthropic,
             Provider::Generic { .. } => WireFormat::OpenAI,
         }
     }
+}
+
+/// True for Gemini generation methods (`models/<m>:generateContent`, `:streamGenerateContent`).
+pub fn is_gemini_generation_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent")
+}
+
+/// True for Gemini's streaming method, which streams without a `stream` body flag.
+pub fn is_gemini_stream_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    path.ends_with(":streamGenerateContent")
+}
+
+/// True for paths only the Gemini API serves: versioned Gemini prefixes, file uploads, and
+/// `model:method` calls.
+fn is_gemini_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    const PREFIXES: &[&str] = &["/v1beta/", "/v1alpha/", "/upload/v1beta/"];
+    PREFIXES.iter().any(|p| path.starts_with(p))
+        || (path.starts_with("/v1/models/") && path.contains(':'))
+}
+
+/// Replaces the value of a `key=` query parameter (Gemini API keys can travel in the URL)
+/// so a URL can be logged.
+pub fn redact_url_secrets(url: &str) -> String {
+    let Some((base, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let query = query
+        .split('&')
+        .map(|kv| match kv.split_once('=') {
+            Some((k, _)) if k.eq_ignore_ascii_case("key") => format!("{k}=REDACTED"),
+            _ => kv.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base}?{query}")
 }
 
 /// Returns true if an IPv4 address is loopback, private, link-local, broadcast, unspecified, or reserved/testing.
@@ -336,8 +388,10 @@ pub fn forwardable_request_headers(headers: &HeaderMap) -> HeaderMap {
 ///
 /// Detection strategy:
 ///   1. If `x-retoken-upstream-url` header is present -> Generic provider (validated)
-///   2. Credentials of a provider ReToken cannot route (Gemini `x-goog-api-key`, `?key=`)
-///      -> rejected, so they are never forwarded to another provider
+///   2. Gemini: a Gemini-only path (`/v1beta/...`, `models/<m>:method`) or an
+///      `x-goog-api-key` header -> Gemini. Gemini Code Assist sign-in traffic (`/v1internal`)
+///      and a bare `?key=` on any other path are rejected, so those credentials are never
+///      forwarded to a provider they were not meant for
 ///   3. If path contains `/v1/messages` or starts with `/messages` -> Anthropic (Claude API)
 ///   4. If path targets OpenAI Chat Completions or Responses (`/v1/chat/completions`,
 ///      `/v1/responses`, with or without `/v1`) -> OpenAI
@@ -374,15 +428,21 @@ pub fn detect_provider(
         });
     }
 
-    // 2. Never guess a destination for another provider's credentials.
+    // 2. Gemini, and never a guessed destination for another provider's credentials.
     let has_header = |wanted: &str| headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(wanted));
-    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-    if has_header("x-goog-api-key")
-        || query.split('&').any(|kv| kv.starts_with("key="))
-        || path.starts_with("/v1beta/")
-    {
+    if path.starts_with("/v1internal") {
         return Err(
-            "Gemini API requests are not supported; set x-retoken-upstream-url to route them explicitly"
+            "Gemini Code Assist (Google sign-in) requests are not supported; use a Gemini API key"
+                .to_string(),
+        );
+    }
+    if is_gemini_path(path) || has_header("x-goog-api-key") {
+        return Ok(Provider::Gemini);
+    }
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    if query.split('&').any(|kv| kv.starts_with("key=")) {
+        return Err(
+            "A `key=` query credential on a non-Gemini path cannot be routed; set x-retoken-upstream-url"
                 .to_string(),
         );
     }
@@ -448,7 +508,7 @@ pub fn build_target_url(
                 normalized_path = format!("/v1{}", normalized_path);
             }
         }
-        Provider::Generic { .. } => {}
+        Provider::Gemini | Provider::Generic { .. } => {}
     }
 
     // Avoid duplicating /v1 if base_url already ends with /v1
@@ -484,6 +544,7 @@ pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUs
     match serde_json::from_slice::<serde_json::Value>(response_body) {
         Ok(json) => json
             .get("usage")
+            .or_else(|| json.get("usageMetadata"))
             .map(|u| usage_from_object(provider, u))
             .unwrap_or_default(),
         Err(_) => TokenUsage::default(),
@@ -493,8 +554,23 @@ pub fn extract_token_usage(provider: &Provider, response_body: &[u8]) -> TokenUs
 /// Parses a provider `usage` object into token counts.
 pub fn usage_from_object(provider: &Provider, usage_obj: &serde_json::Value) -> TokenUsage {
     let mut usage = TokenUsage::default();
+    let count = |key: &str| {
+        usage_obj
+            .get(key)
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+    };
+    // Gemini `usageMetadata`, from the Gemini provider or a generic upstream serving it.
+    if matches!(provider, Provider::Gemini) || usage_obj.get("promptTokenCount").is_some() {
+        usage.input_tokens = count("promptTokenCount");
+        usage.output_tokens = count("candidatesTokenCount");
+        usage.cached_tokens = count("cachedContentTokenCount");
+        usage.reasoning_tokens = count("thoughtsTokenCount");
+        return usage;
+    }
 
     match provider {
+        Provider::Gemini => {}
         Provider::Anthropic => {
             usage.input_tokens = usage_obj
                 .get("input_tokens")
@@ -721,10 +797,34 @@ mod tests {
                 .map(|(a, b)| (a.to_string(), b.to_string()))
                 .collect()
         };
-        // Gemini credentials must never be forwarded to Anthropic or OpenAI.
-        assert!(detect_provider("/v1beta/models/g:generateContent", &h(&[]), false, &[]).is_err());
-        assert!(detect_provider("/v1/models", &h(&[("x-goog-api-key", "k")]), false, &[]).is_err());
+        // Gemini credentials only ever go to Gemini.
+        let gemini = |path: &str, headers: &[(&str, &str)]| {
+            detect_provider(path, &h(headers), false, &[]).unwrap()
+        };
+        assert_eq!(
+            gemini("/v1beta/models/g:generateContent", &[]),
+            Provider::Gemini
+        );
+        assert_eq!(
+            gemini(
+                "/v1beta/models/g:streamGenerateContent?alt=sse&key=abc",
+                &[]
+            ),
+            Provider::Gemini
+        );
+        assert_eq!(
+            gemini("/v1/models/g:generateContent", &[]),
+            Provider::Gemini
+        );
+        assert_eq!(
+            gemini("/v1/models", &[("x-goog-api-key", "k")]),
+            Provider::Gemini
+        );
+        assert_eq!(gemini("/upload/v1beta/files", &[]), Provider::Gemini);
+        // A bare `?key=` elsewhere, or Code Assist sign-in traffic, is never guessed.
         assert!(detect_provider("/v1/models?key=abc", &h(&[]), false, &[]).is_err());
+        let signed_in = h(&[("authorization", "Bearer ya29.x")]);
+        assert!(detect_provider("/v1internal:generateContent", &signed_in, false, &[]).is_err());
         // Anthropic OAuth (Bearer + anthropic-version) on a non-messages path stays Anthropic.
         let oauth = h(&[
             ("authorization", "Bearer sk-ant-oat"),
@@ -899,5 +999,40 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(1200));
         assert_eq!(usage.cached_tokens, Some(300));
         assert_eq!(usage.reasoning_tokens, Some(850));
+    }
+
+    #[test]
+    fn redacts_api_keys_in_urls() {
+        assert_eq!(
+            redact_url_secrets(
+                "https://g.example/v1beta/models/m:generateContent?alt=sse&key=AIza123"
+            ),
+            "https://g.example/v1beta/models/m:generateContent?alt=sse&key=REDACTED"
+        );
+        assert_eq!(redact_url_secrets("/v1/messages"), "/v1/messages");
+        assert_eq!(redact_url_secrets("/p?monkey=1"), "/p?monkey=1");
+    }
+
+    #[test]
+    fn gemini_usage_and_wire_format() {
+        let body = br#"{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":8,"cachedContentTokenCount":100,"thoughtsTokenCount":4}}"#;
+        let usage = extract_token_usage(&Provider::Gemini, body);
+        assert_eq!(usage.input_tokens, Some(120));
+        assert_eq!(usage.output_tokens, Some(8));
+        assert_eq!(usage.cached_tokens, Some(100));
+        assert_eq!(usage.reasoning_tokens, Some(4));
+        let p = Provider::Gemini;
+        assert_eq!(
+            WireFormat::detect(&p, "/v1beta/models/m:generateContent"),
+            WireFormat::Gemini
+        );
+        assert_eq!(
+            WireFormat::detect(&p, "/v1beta/openai/chat/completions"),
+            WireFormat::OpenAI
+        );
+        assert!(is_gemini_stream_path(
+            "/v1beta/models/m:streamGenerateContent?alt=sse"
+        ));
+        assert!(!is_gemini_stream_path("/v1beta/models/m:generateContent"));
     }
 }

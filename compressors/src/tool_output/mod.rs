@@ -22,7 +22,7 @@ mod calls;
 mod classify;
 mod policy;
 
-pub use policy::{ccr_size_threshold, log_line_threshold};
+pub use policy::{ccr_size_threshold, log_line_threshold, shorten_command_output};
 
 use serde_json::Value;
 

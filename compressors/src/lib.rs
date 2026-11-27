@@ -1,6 +1,7 @@
 pub mod anomaly;
 pub mod ccr;
 pub mod code_outline;
+pub mod gemini;
 pub mod inject;
 pub mod json;
 pub mod logs;

@@ -56,6 +56,15 @@ impl RequestParams {
         let Some(body) = body else {
             return Self::default();
         };
+        // Gemini puts sampling settings in `generationConfig` (or `generation_config`).
+        let generation = body
+            .get("generationConfig")
+            .or_else(|| body.get("generation_config"));
+        let setting = |openai: &str, gemini_camel: &str, gemini_snake: &str| {
+            body.get(openai).or_else(|| {
+                generation.and_then(|g| g.get(gemini_camel).or_else(|| g.get(gemini_snake)))
+            })
+        };
         Self {
             model: body
                 .get("model")
@@ -65,12 +74,12 @@ impl RequestParams {
                 .get("stream")
                 .and_then(|s| s.as_bool())
                 .unwrap_or(false),
-            temperature: body.get("temperature").and_then(|t| t.as_f64()),
-            multiple_completions: body
-                .get("n")
+            temperature: setting("temperature", "temperature", "temperature")
+                .and_then(|t| t.as_f64()),
+            multiple_completions: setting("n", "candidateCount", "candidate_count")
                 .and_then(|n| n.as_u64())
                 .is_some_and(|n| n > 1),
-            has_seed: body.get("seed").is_some(),
+            has_seed: setting("seed", "seed", "seed").is_some(),
         }
     }
 }

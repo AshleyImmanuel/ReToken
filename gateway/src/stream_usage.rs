@@ -65,9 +65,11 @@ impl SseUsageScanner {
             return; // e.g. "[DONE]" or non-JSON payloads
         };
         // Anthropic `message_delta` and OpenAI chat chunks carry `usage` at the top level;
-        // Anthropic `message_start` nests it under `message`, OpenAI Responses under `response`.
+        // Anthropic `message_start` nests it under `message`, OpenAI Responses under `response`,
+        // Gemini (`alt=sse`) chunks carry `usageMetadata`.
         let usage_obj = event
             .get("usage")
+            .or_else(|| event.get("usageMetadata"))
             .or_else(|| event.get("message").and_then(|m| m.get("usage")))
             .or_else(|| event.get("response").and_then(|r| r.get("usage")));
         if let Some(obj) = usage_obj.filter(|u| u.is_object()) {
@@ -187,5 +189,13 @@ mod tests {
     fn ignores_invalid_events_and_done_markers() {
         let usage = scan(Provider::OpenAI, &[b"data: not-json\n\ndata: [DONE]\n\n"]);
         assert_eq!(usage, TokenUsage::default());
+    }
+
+    #[test]
+    fn gemini_sse_usage_metadata() {
+        let stream: &[u8] = b"data: {\"candidates\":[]}\r\n\r\ndata: {\"usageMetadata\":{\"promptTokenCount\":50,\"candidatesTokenCount\":7}}\r\n\r\n";
+        let usage = scan(Provider::Gemini, &[stream]);
+        assert_eq!(usage.input_tokens, Some(50));
+        assert_eq!(usage.output_tokens, Some(7));
     }
 }

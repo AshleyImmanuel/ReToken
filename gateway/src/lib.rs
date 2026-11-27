@@ -78,10 +78,6 @@ pub fn app(config: AppConfig, ccr_store: Arc<CcrStore>) -> anyhow::Result<Router
         .with_state(state))
 }
 
-/// CCR originals no conversation has re-stored for this long are purged. Every compression
-/// re-stores (and so refreshes) the originals a live conversation still references.
-const CCR_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
-
 /// How often the CCR store is garbage-collected. The daemon runs for weeks from logon, so
 /// collecting only at startup would let the store grow without bound.
 const CCR_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -93,7 +89,10 @@ fn spawn_ccr_gc(store: Arc<CcrStore>) {
         loop {
             tick.tick().await;
             let store = store.clone();
-            if let Err(e) = tokio::task::spawn_blocking(move || store.gc(CCR_MAX_AGE_SECS)).await {
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || store.gc(compressors::ccr::store::MAX_AGE_SECS))
+                    .await
+            {
                 tracing::warn!("CCR gc task failed: {}", e);
             }
         }

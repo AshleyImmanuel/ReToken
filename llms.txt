@@ -1,6 +1,6 @@
 # ReToken
 
-> ReToken is a free, open-source (MIT) local proxy written in Rust that reduces the token cost of AI coding agents such as Claude Code, opencode, Cursor, Windsurf, RooCode, Aider and Codex. It runs on 127.0.0.1:8888 between the agent and the model provider (Anthropic, OpenAI, or any compatible endpoint), compresses tool output, places prompt-cache breakpoints, and can ask for terse replies. It never shortens a file the model is still reading, and every lossy change can be undone through its `retoken_retrieve` MCP tool.
+> ReToken is a free, open-source (MIT) local proxy written in Rust that reduces the token cost of AI coding agents such as Claude Code, opencode, Cursor, Windsurf, RooCode, Aider and Codex. It runs on 127.0.0.1:8888 between the agent and the model provider (Anthropic, OpenAI, the Gemini API, or any compatible endpoint), compresses tool output, places prompt-cache breakpoints, and can ask for terse replies. It never shortens a file the model is still reading, and every lossy change can be undone through its `retoken_retrieve` MCP tool.
 
 Repository: https://github.com/AshleyImmanuel/ReToken
 License: MIT

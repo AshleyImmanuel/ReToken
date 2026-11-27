@@ -44,6 +44,8 @@ pub struct AppConfig {
     pub elision_note: String,
     pub anthropic_base_url: String,
     pub openai_base_url: String,
+    /// Gemini API upstream for requests in the Gemini `generateContent` format.
+    pub gemini_base_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -97,6 +99,7 @@ impl Default for AppConfig {
             elision_note: "Elements elided by ReToken. Original recoverable via retoken_retrieve tool.".to_string(),
             anthropic_base_url: "https://api.anthropic.com".to_string(),
             openai_base_url: "https://api.openai.com".to_string(),
+            gemini_base_url: "https://generativelanguage.googleapis.com".to_string(),
         }
     }
 }
@@ -191,6 +194,9 @@ impl AppConfig {
         }
         if let Ok(v) = std::env::var("RETOKEN_OPENAI_BASE_URL") {
             self.openai_base_url = v;
+        }
+        if let Ok(v) = std::env::var("RETOKEN_GEMINI_BASE_URL") {
+            self.gemini_base_url = v;
         }
     }
 }

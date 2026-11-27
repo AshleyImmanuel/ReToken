@@ -57,7 +57,8 @@ fn endpoint(path: &str) -> String {
 }
 
 /// Returns true if the request path targets an LLM completion/generation endpoint
-/// (Anthropic Messages, OpenAI Chat Completions, legacy Completions, OpenAI Responses).
+/// (Anthropic Messages, OpenAI Chat Completions, legacy Completions, OpenAI Responses,
+/// Gemini `generateContent` and `streamGenerateContent`).
 /// Matched by suffix so prefixed base URLs (`/w/claude/v1/messages`) still count, while
 /// sub-resources such as `/v1/responses/input_tokens` do not.
 pub fn is_generation_endpoint(path: &str) -> bool {
@@ -67,6 +68,8 @@ pub fn is_generation_endpoint(path: &str) -> bool {
         "/chat/completions",
         "/completions",
         "/responses",
+        ":generatecontent",
+        ":streamgeneratecontent",
     ]
     .iter()
     .any(|suffix| path.ends_with(suffix))

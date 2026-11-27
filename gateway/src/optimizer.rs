@@ -36,7 +36,24 @@ pub fn optimize_payload(
 
     // Phase 1: Provider-aware heuristic compression pipeline (only run if compression_enabled)
     let mut pipeline_stats = None;
-    if config.compression_enabled {
+    if format == WireFormat::Gemini {
+        // Gemini has no proxy-side recovery: lossy elision needs the client's `retoken mcp`
+        // tool. Its implicit prefix caching needs no breakpoints, so there is no phase 2; the
+        // policy keeps history byte-stable, which is what that caching relies on.
+        if config.compression_enabled {
+            let tool = compressors::gemini::find_retrieve_tool(json_body);
+            let stats = compressors::gemini::run_pipeline(
+                json_body,
+                ccr_store,
+                persona,
+                &config.elision_note,
+                tool.as_deref(),
+            );
+            pipeline_stats = Some(stats);
+        } else if config.terse_mode {
+            compressors::gemini::inject_persona(json_body, persona);
+        }
+    } else if config.compression_enabled {
         // A client-provided retrieval tool (`retoken mcp`) works for streaming requests too,
         // since the agent executes it. Proxy-side recovery needs a buffered Anthropic response.
         let recovery = match compressors::inject::find_client_retrieve_tool(json_body) {
@@ -76,6 +93,7 @@ pub fn optimize_payload(
             WireFormat::OpenAI => {
                 packer::optimize_openai_prefix(json_body);
             }
+            WireFormat::Gemini => {}
         }
     }
 

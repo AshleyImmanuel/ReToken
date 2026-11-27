@@ -58,10 +58,13 @@ pub async fn forward_raw(
 
     let resp = client.execute(reqwest_req).await.map_err(|e| {
         if is_ssrf_block(&e) {
-            warn!("Bypass destination blocked by SSRF policy: {}", e);
+            warn!(
+                "Bypass destination blocked by SSRF policy: {}",
+                e.without_url()
+            );
             axum::http::StatusCode::FORBIDDEN
         } else {
-            warn!("Bypass proxy failed: {}", e);
+            warn!("Bypass proxy failed: {}", e.without_url());
             axum::http::StatusCode::BAD_GATEWAY
         }
     })?;
