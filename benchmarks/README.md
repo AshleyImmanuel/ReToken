@@ -5,7 +5,7 @@ A reproducible version of the benchmark behind the savings numbers in the main
 tasks from the same clean checkout, once **direct to the API**, once **through
 ReToken**, and once **through ReToken with terse mode**, and the harness reports
 **cost per solved task** for each (the metric in
-[`docs/superpowers/specs/2026-11-13-retoken-cost-harness-design.md`](../docs/superpowers/specs/2026-11-13-retoken-cost-harness-design.md)).
+[`docs/design/cost-harness-design.md`](../docs/design/cost-harness-design.md)).
 
 The numbers in the main README come from a November 2026 run whose script was
 never committed. This directory is that benchmark rebuilt so anyone can re-run

@@ -1,9 +1,11 @@
 [package]
 name = "scheduler"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-retoken_core = { version = "0.1.0", path = "../core" }
+retoken_core = { path = "../core" }
 tokio = { workspace = true, features = ["process", "rt", "sync", "time", "macros"] }
 uuid = { version = "1.26.1", features = ["v4"] }

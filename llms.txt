@@ -14,8 +14,6 @@ Coding agents re-send the whole conversation every turn, including long build lo
 ## Measured results
 
 - Headless Claude Code benchmark (Claude Sonnet, November 2026, 3 tasks x 3 repeats per setup, all 36 runs correct): direct API $0.0425 per task, caveman proxy $0.0330, ReToken $0.0329, ReToken + terse mode $0.0302 (29% below direct, 3.78 turns against 4.78).
-- One larger multi-file task: ReToken + terse $0.264 against $0.452 direct (42% lower).
-- Savings grow with session length and tool-output size.
 
 ## How it works
 

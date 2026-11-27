@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "analyzers"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "ignore",
  "regex",
@@ -302,7 +302,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "analyzers",
  "anyhow",
@@ -325,7 +325,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "compressors"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "hex",
  "regex",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "analyzers",
  "anyhow",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "retoken_core"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "retoken_mcp"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "retrieval"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "analyzers",
  "serde_json",
@@ -1498,7 +1498,7 @@ dependencies = [
 
 [[package]]
 name = "scheduler"
-version = "0.1.0"
+version = "1.2.1"
 dependencies = [
  "retoken_core",
  "tokio",

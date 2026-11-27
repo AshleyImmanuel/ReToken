@@ -11,7 +11,7 @@ pub mod wrap;
 
 #[derive(Parser, Debug, PartialEq)]
 #[command(name = "retoken")]
-#[command(about = "ReToken Agent Runtime", long_about = None)]
+#[command(version, about = "Local proxy that cuts coding-agent token costs", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
