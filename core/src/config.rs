@@ -71,44 +71,32 @@ fn parse_env_var<T: std::str::FromStr>(name: &str) -> Option<T> {
     }
 }
 
+/// Built-in defaults only. Environment variables are applied by [`AppConfig::load`], so
+/// `default()` is deterministic and does not depend on the caller's environment.
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            token_budget: parse_env_var("RETOKEN_TOKEN_BUDGET").unwrap_or(32_000),
+            token_budget: 32_000,
             sandbox_mode: SandboxMode::Native,
-            cache_enabled: parse_env_var("RETOKEN_CACHE_ENABLED").unwrap_or(true),
-            cache_ttl_secs: parse_env_var("RETOKEN_CACHE_TTL_SECS").unwrap_or(300),
-            max_cache_entries: parse_env_var("RETOKEN_MAX_CACHE_ENTRIES").unwrap_or(1024),
-            max_cache_bytes: parse_env_var("RETOKEN_MAX_CACHE_BYTES")
-                .unwrap_or(256 * 1024 * 1024),
-            terse_mode: parse_env_var("RETOKEN_TERSE_MODE").unwrap_or(false),
-            compression_enabled: parse_env_var("RETOKEN_COMPRESSION_ENABLED").unwrap_or(true),
-            ccr_enabled: parse_env_var("RETOKEN_CCR_ENABLED").unwrap_or(false),
-            block_reuse_enabled: parse_env_var("RETOKEN_BLOCK_REUSE_ENABLED").unwrap_or(false),
-            prompt_caching_enabled: parse_env_var("RETOKEN_PROMPT_CACHING_ENABLED")
-                .unwrap_or(true),
-            port: parse_env_var("RETOKEN_PORT").unwrap_or(8888),
-            max_request_body_bytes: parse_env_var("RETOKEN_MAX_REQUEST_BODY_BYTES")
-                .unwrap_or(10 * 1024 * 1024),
-            max_response_body_bytes: parse_env_var("RETOKEN_MAX_RESPONSE_BODY_BYTES")
-                .unwrap_or(10 * 1024 * 1024),
-            allow_private_upstreams: parse_env_var("RETOKEN_ALLOW_PRIVATE_UPSTREAMS")
-                .unwrap_or(false),
-            allowed_upstream_hosts: std::env::var("RETOKEN_ALLOWED_UPSTREAM_HOSTS")
-                .ok()
-                .map(|s| {
-                    s.split(',')
-                        .map(|item| item.trim().to_string())
-                        .filter(|item| !item.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            upstream_timeout_secs: parse_env_var("RETOKEN_UPSTREAM_TIMEOUT_SECS")
-                .unwrap_or(60),
-            persona_prompt: std::env::var("RETOKEN_PERSONA_PROMPT").unwrap_or_else(|_| "[ReToken terse mode] Write prose replies tersely: answer first, then only the reasoning that matters. No greetings, filler, hedging, or recaps. Keep every fact, number, negation, warning, and caveat. Write code, commands, file contents, commit messages, and tool inputs normally, not tersely. If tool output was elided by ReToken, call the retrieval tool named in the marker instead of guessing.".to_string()),
-            elision_note: std::env::var("RETOKEN_ELISION_NOTE").unwrap_or_else(|_| "Elements elided by ReToken. Original recoverable via retoken_retrieve tool.".to_string()),
-            anthropic_base_url: std::env::var("RETOKEN_ANTHROPIC_BASE_URL").unwrap_or_else(|_| "https://api.anthropic.com".to_string()),
-            openai_base_url: std::env::var("RETOKEN_OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string()),
+            cache_enabled: true,
+            cache_ttl_secs: 300,
+            max_cache_entries: 1024,
+            max_cache_bytes: 256 * 1024 * 1024,
+            terse_mode: false,
+            compression_enabled: true,
+            ccr_enabled: false,
+            block_reuse_enabled: false,
+            prompt_caching_enabled: true,
+            port: 8888,
+            max_request_body_bytes: 10 * 1024 * 1024,
+            max_response_body_bytes: 10 * 1024 * 1024,
+            allow_private_upstreams: false,
+            allowed_upstream_hosts: Vec::new(),
+            upstream_timeout_secs: 60,
+            persona_prompt: "[ReToken terse mode] Write prose replies tersely: answer first, then only the reasoning that matters. No greetings, filler, hedging, or recaps. Keep every fact, number, negation, warning, and caveat. Write code, commands, file contents, commit messages, and tool inputs normally, not tersely. If tool output was elided by ReToken, call the retrieval tool named in the marker instead of guessing.".to_string(),
+            elision_note: "Elements elided by ReToken. Original recoverable via retoken_retrieve tool.".to_string(),
+            anthropic_base_url: "https://api.anthropic.com".to_string(),
+            openai_base_url: "https://api.openai.com".to_string(),
         }
     }
 }
@@ -258,6 +246,20 @@ mod tests {
         );
         assert_eq!(config.upstream_timeout_secs, 60);
         assert!(config.allowed_upstream_hosts.is_empty());
+    }
+
+    #[test]
+    fn test_default_ignores_env_and_overrides_apply_it() {
+        // Only this test touches RETOKEN_CACHE_TTL_SECS, so it cannot race other tests.
+        std::env::set_var("RETOKEN_CACHE_TTL_SECS", "4242");
+        let mut config = AppConfig::default();
+        assert_eq!(
+            config.cache_ttl_secs, 300,
+            "default() must not read env vars"
+        );
+        config.apply_env_overrides();
+        assert_eq!(config.cache_ttl_secs, 4242, "env overrides still apply");
+        std::env::remove_var("RETOKEN_CACHE_TTL_SECS");
     }
 
     #[test]
